@@ -47,7 +47,7 @@
 
 Alert and recording rule source:
 
-- `deploy/prometheus/github-stats-exporter-alert-rules.yaml`
+- `deploy/prometheus/github-stats-alert-rules.yaml`
 
 ## Quick Verification Commands (Compose)
 

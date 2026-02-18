@@ -36,6 +36,13 @@ spec:
         - name: sentinel
           image: redis:7.2-alpine
           command: ["/bin/sh", "-ec"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
           args:
             - |
               cat <<'EOF' > /tmp/sentinel.conf

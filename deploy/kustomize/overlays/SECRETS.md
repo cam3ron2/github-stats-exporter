@@ -1,11 +1,11 @@
-## Kustomize secret inputs
+# Kustomize secret inputs
 
 The nonprod and prod overlays now generate Kubernetes Secrets via `secretGenerator`.
 
 Before running `kustomize build` or `kubectl apply -k`, copy the example files to the
 expected filenames and replace values with real secrets.
 
-### Nonprod
+## Nonprod
 
 ```bash
 cp deploy/kustomize/overlays/nonprod/secrets/github/org-a.pem.example \
@@ -18,7 +18,7 @@ cp deploy/kustomize/overlays/nonprod/secrets/rabbitmq/erlang-cookie.example \
   deploy/kustomize/overlays/nonprod/secrets/rabbitmq/erlang-cookie
 ```
 
-### Prod
+## Prod
 
 ```bash
 cp deploy/kustomize/overlays/prod/secrets/github/org-a.pem.example \
