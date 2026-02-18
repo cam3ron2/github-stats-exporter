@@ -46,6 +46,8 @@ type OrgSummary struct {
 	RateLimitMinRemaining   int
 	RateLimitResetUnix      int64
 	SecondaryLimitHits      int
+	GitHubRequestTotals     map[string]int
+	LOCFallbackBudgetHits   int
 }
 
 // Outcome contains scrape results and errors for one organization.
@@ -58,6 +60,17 @@ type Outcome struct {
 // OrgScraper scrapes one organization.
 type OrgScraper interface {
 	ScrapeOrg(ctx context.Context, org config.GitHubOrgConfig) (OrgResult, error)
+}
+
+// CheckpointStore persists per-org/repo scrape progress.
+type CheckpointStore interface {
+	SetCheckpoint(org, repo string, checkpoint time.Time) error
+	GetCheckpoint(org, repo string) (time.Time, bool, error)
+}
+
+// CheckpointAwareScraper allows runtime to inject checkpoint persistence.
+type CheckpointAwareScraper interface {
+	SetCheckpointStore(checkpoints CheckpointStore)
 }
 
 // BackfillScraper provides backfill-window specific scraping behavior.

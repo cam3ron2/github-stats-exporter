@@ -10,6 +10,10 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 func TestNewRabbitMQHTTPBroker(t *testing.T) {
@@ -318,6 +322,145 @@ func TestRabbitMQHTTPBrokerDepth(t *testing.T) {
 
 	if got := broker.Depth("gh.backfill.jobs"); got != 7 {
 		t.Fatalf("Depth() = %d, want 7", got)
+	}
+}
+
+func TestRabbitMQHTTPBrokerEnsureTopology(t *testing.T) {
+	t.Parallel()
+
+	var (
+		mu    sync.Mutex
+		calls = make(map[string]int)
+	)
+	client := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			mu.Lock()
+			calls[req.Method+" "+req.URL.EscapedPath()]++
+			mu.Unlock()
+			return jsonResponse(http.StatusCreated, map[string]any{}), nil
+		}),
+	}
+
+	broker, err := NewRabbitMQHTTPBroker(RabbitMQHTTPConfig{
+		ManagementURL: "http://rabbitmq.local",
+		VHost:         "/",
+		Exchange:      "gh.backfill",
+		HTTPClient:    client,
+	})
+	if err != nil {
+		t.Fatalf("NewRabbitMQHTTPBroker() unexpected error: %v", err)
+	}
+
+	err = broker.EnsureTopology(context.Background(), TopologyConfig{
+		MainQueue:       "gh.backfill.jobs",
+		DeadLetterQueue: "gh.backfill.dlq",
+		RetryQueues: []RetryQueueSpec{
+			{Name: "gh.backfill.jobs.retry.1m0s", Delay: time.Minute},
+			{Name: "gh.backfill.jobs.retry.5m0s", Delay: 5 * time.Minute},
+		},
+	})
+	if err != nil {
+		t.Fatalf("EnsureTopology() unexpected error: %v", err)
+	}
+
+	requiredCalls := []string{
+		"PUT /api/exchanges/%2F/gh.backfill",
+		"PUT /api/queues/%2F/gh.backfill.jobs",
+		"POST /api/bindings/%2F/e/gh.backfill/q/gh.backfill.jobs",
+		"PUT /api/queues/%2F/gh.backfill.dlq",
+		"POST /api/bindings/%2F/e/gh.backfill/q/gh.backfill.dlq",
+		"PUT /api/queues/%2F/gh.backfill.jobs.retry.1m0s",
+		"POST /api/bindings/%2F/e/gh.backfill/q/gh.backfill.jobs.retry.1m0s",
+		"PUT /api/queues/%2F/gh.backfill.jobs.retry.5m0s",
+		"POST /api/bindings/%2F/e/gh.backfill/q/gh.backfill.jobs.retry.5m0s",
+	}
+	for _, call := range requiredCalls {
+		mu.Lock()
+		count := calls[call]
+		mu.Unlock()
+		if count != 1 {
+			t.Fatalf("call %q count = %d, want 1", call, count)
+		}
+	}
+}
+
+func TestRabbitMQHTTPBrokerHealth(t *testing.T) {
+	t.Parallel()
+
+	client := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Method != http.MethodGet || req.URL.EscapedPath() != "/api/queues/%2F/gh.backfill.jobs" {
+				return jsonResponse(http.StatusNotFound, map[string]any{"error": "not found"}), nil
+			}
+			return jsonResponse(http.StatusOK, map[string]any{"messages": 0}), nil
+		}),
+	}
+
+	broker, err := NewRabbitMQHTTPBroker(RabbitMQHTTPConfig{
+		ManagementURL: "http://rabbitmq.local",
+		VHost:         "/",
+		Exchange:      "gh.backfill",
+		HTTPClient:    client,
+	})
+	if err != nil {
+		t.Fatalf("NewRabbitMQHTTPBroker() unexpected error: %v", err)
+	}
+	if err := broker.Health(context.Background(), "gh.backfill.jobs"); err != nil {
+		t.Fatalf("Health() unexpected error: %v", err)
+	}
+	if err := broker.Health(context.Background(), ""); err == nil {
+		t.Fatalf("Health(empty queue) expected error, got nil")
+	}
+}
+
+func TestRabbitMQHTTPBrokerEmitsTracingSpans(t *testing.T) {
+	previousProvider := otel.GetTracerProvider()
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithSpanProcessor(recorder),
+	)
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(previousProvider)
+		_ = provider.Shutdown(context.Background())
+	})
+
+	client := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Method != http.MethodPost || req.URL.EscapedPath() != "/api/exchanges/%2F/gh.backfill/publish" {
+				return jsonResponse(http.StatusNotFound, map[string]any{"error": "not found"}), nil
+			}
+			return jsonResponse(http.StatusOK, map[string]any{"routed": true}), nil
+		}),
+	}
+
+	broker, err := NewRabbitMQHTTPBroker(RabbitMQHTTPConfig{
+		ManagementURL: "http://rabbitmq.local",
+		VHost:         "/",
+		Exchange:      "gh.backfill",
+		HTTPClient:    client,
+	})
+	if err != nil {
+		t.Fatalf("NewRabbitMQHTTPBroker() unexpected error: %v", err)
+	}
+
+	if err := broker.Publish(context.Background(), "gh.backfill.jobs", Message{
+		ID:   "job-1",
+		Body: []byte(`{"org":"org-a"}`),
+	}); err != nil {
+		t.Fatalf("Publish() unexpected error: %v", err)
+	}
+
+	found := false
+	for _, span := range recorder.Ended() {
+		if span.Name() == "rabbitmq.http.request" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("missing rabbitmq.http.request span")
 	}
 }
 

@@ -134,3 +134,34 @@ func TestMemoryStoreGC(t *testing.T) {
 		t.Fatalf("remaining user = %q, want %q", series[0].Labels["user"], "bob")
 	}
 }
+
+func TestMemoryStoreCheckpointLifecycle(t *testing.T) {
+	t.Parallel()
+
+	store := NewMemoryStore(time.Hour, 1000)
+	now := time.Unix(1739836800, 0)
+
+	if err := store.SetCheckpoint("org-a", "repo-a", now); err != nil {
+		t.Fatalf("SetCheckpoint() unexpected error: %v", err)
+	}
+
+	checkpoint, found, err := store.GetCheckpoint("org-a", "repo-a")
+	if err != nil {
+		t.Fatalf("GetCheckpoint() unexpected error: %v", err)
+	}
+	if !found {
+		t.Fatalf("GetCheckpoint() found = false, want true")
+	}
+	if !checkpoint.Equal(now) {
+		t.Fatalf("GetCheckpoint() = %s, want %s", checkpoint, now)
+	}
+
+	store.GC(now.Add(2 * time.Hour))
+	_, found, err = store.GetCheckpoint("org-a", "repo-a")
+	if err != nil {
+		t.Fatalf("GetCheckpoint(after gc) unexpected error: %v", err)
+	}
+	if found {
+		t.Fatalf("GetCheckpoint(after gc) found = true, want false")
+	}
+}

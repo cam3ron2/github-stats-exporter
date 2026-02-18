@@ -129,3 +129,96 @@ func TestTraceModeNormalizationAndDependencyTracing(t *testing.T) {
 		})
 	}
 }
+
+func TestOTLPTraceEndpoint(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name     string
+		endpoint string
+		wantErr  bool
+	}{
+		{
+			name:     "host_port_defaults_to_insecure",
+			endpoint: "otel-collector:4317",
+		},
+		{
+			name:     "http_url_is_insecure",
+			endpoint: "http://otel-collector:4317",
+		},
+		{
+			name:     "https_url_is_tls",
+			endpoint: "https://otel-collector:4317",
+		},
+		{
+			name:     "invalid_url_returns_error",
+			endpoint: "https://",
+			wantErr:  true,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			endpoint, err := otlpTraceEndpoint(tc.endpoint)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("otlpTraceEndpoint() expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("otlpTraceEndpoint() unexpected error: %v", err)
+			}
+			if endpoint == "" {
+				t.Fatalf("otlpTraceEndpoint() returned empty endpoint")
+			}
+		})
+	}
+}
+
+func TestSetupBuildsOTLPExporterWhenEndpointConfigured(t *testing.T) {
+	t.Parallel()
+
+	originalFactory := newOTLPExporter
+	t.Cleanup(func() {
+		newOTLPExporter = originalFactory
+	})
+
+	called := false
+	newOTLPExporter = func(endpoint string) (sdktrace.SpanExporter, error) {
+		called = true
+		if endpoint == "" {
+			t.Fatalf("newOTLPExporter() endpoint is empty")
+		}
+		return &noopExporter{}, nil
+	}
+
+	runtime, err := Setup(Config{
+		Enabled:      true,
+		ServiceName:  "github-stats",
+		OTLPEndpoint: "otel-collector:4317",
+		TraceMode:    "sampled",
+	})
+	if err != nil {
+		t.Fatalf("Setup() unexpected error: %v", err)
+	}
+	if !called {
+		t.Fatalf("Setup() did not build OTLP exporter")
+	}
+	if err := runtime.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown() unexpected error: %v", err)
+	}
+}
+
+type noopExporter struct{}
+
+func (e *noopExporter) ExportSpans(context.Context, []sdktrace.ReadOnlySpan) error {
+	return nil
+}
+
+func (e *noopExporter) Shutdown(context.Context) error {
+	return nil
+}

@@ -11,6 +11,9 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 type fakeRedisClient struct {
@@ -311,13 +314,24 @@ func inScoreRange(score float64, min float64, minExclusive bool, max float64, ma
 }
 
 func newRedisStoreForTest(t *testing.T, now time.Time, retention time.Duration, maxSeries int) (*RedisStore, *fakeRedisClient) {
+	return newRedisStoreForTestWithShards(t, now, retention, maxSeries, 1)
+}
+
+func newRedisStoreForTestWithShards(
+	t *testing.T,
+	now time.Time,
+	retention time.Duration,
+	maxSeries int,
+	indexShards int,
+) (*RedisStore, *fakeRedisClient) {
 	t.Helper()
 
 	client := newFakeRedisClient(now)
 	store := newRedisStoreFromCommander(client, nil, RedisStoreConfig{
-		Namespace: "github-stats-test",
-		Retention: retention,
-		MaxSeries: maxSeries,
+		Namespace:   "github-stats-test",
+		Retention:   retention,
+		MaxSeries:   maxSeries,
+		IndexShards: indexShards,
 	})
 	return store, client
 }
@@ -644,5 +658,118 @@ func TestRedisStoreSnapshotDeltaDeleteEvent(t *testing.T) {
 	}
 	if delta.Events[0].SeriesID != hashSeriesID(metricKey(point.Name, point.Labels)) {
 		t.Fatalf("delete series id = %q, want %q", delta.Events[0].SeriesID, hashSeriesID(metricKey(point.Name, point.Labels)))
+	}
+}
+
+func TestRedisStoreCheckpointLifecycle(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1739836800, 0)
+	store, client := newRedisStoreForTest(t, now, time.Hour, 100)
+
+	if err := store.SetCheckpoint("org-a", "repo-a", now); err != nil {
+		t.Fatalf("SetCheckpoint() unexpected error: %v", err)
+	}
+
+	checkpoint, found, err := store.GetCheckpoint("org-a", "repo-a")
+	if err != nil {
+		t.Fatalf("GetCheckpoint() unexpected error: %v", err)
+	}
+	if !found {
+		t.Fatalf("GetCheckpoint() found = false, want true")
+	}
+	if !checkpoint.Equal(now) {
+		t.Fatalf("GetCheckpoint() = %s, want %s", checkpoint, now)
+	}
+
+	client.Advance(2 * time.Hour)
+	_, found, err = store.GetCheckpoint("org-a", "repo-a")
+	if err != nil {
+		t.Fatalf("GetCheckpoint(after expiry) unexpected error: %v", err)
+	}
+	if found {
+		t.Fatalf("GetCheckpoint(after expiry) found = true, want false")
+	}
+}
+
+func TestRedisStoreEmitsTracingSpans(t *testing.T) {
+	now := time.Unix(1739836800, 0)
+
+	previousProvider := otel.GetTracerProvider()
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithSpanProcessor(recorder),
+	)
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(previousProvider)
+		_ = provider.Shutdown(context.Background())
+	})
+
+	store, _ := newRedisStoreForTest(t, now, time.Hour, 100)
+	if err := store.SetCheckpoint("org-a", "repo-a", now); err != nil {
+		t.Fatalf("SetCheckpoint() unexpected error: %v", err)
+	}
+	if err := store.UpsertMetric(RoleLeader, SourceLeaderScrape, MetricPoint{
+		Name:      "gh_activity_commits_24h",
+		Labels:    map[string]string{"org": "org-a", "repo": "repo-a", "user": "alice"},
+		Value:     1,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("UpsertMetric() unexpected error: %v", err)
+	}
+
+	seen := map[string]bool{}
+	for _, span := range recorder.Ended() {
+		seen[span.Name()] = true
+	}
+	if !seen["redis.set_checkpoint"] {
+		t.Fatalf("missing redis.set_checkpoint span")
+	}
+	if !seen["redis.upsert_metric"] {
+		t.Fatalf("missing redis.upsert_metric span")
+	}
+}
+
+func TestRedisStoreUsesShardedIndexes(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1739836800, 0)
+	store, client := newRedisStoreForTestWithShards(t, now, 24*time.Hour, 100, 4)
+
+	points := []MetricPoint{
+		{
+			Name:      "gh_activity_commits_24h",
+			Labels:    map[string]string{"org": "org-a", "repo": "repo-a", "user": "alice"},
+			Value:     1,
+			UpdatedAt: now,
+		},
+		{
+			Name:      "gh_activity_commits_24h",
+			Labels:    map[string]string{"org": "org-a", "repo": "repo-a", "user": "bob"},
+			Value:     2,
+			UpdatedAt: now,
+		},
+	}
+	for _, point := range points {
+		if err := store.UpsertMetric(RoleLeader, SourceLeaderScrape, point); err != nil {
+			t.Fatalf("UpsertMetric(%v) unexpected error: %v", point.Labels["user"], err)
+		}
+	}
+
+	shardedKeys := 0
+	for key := range client.sets {
+		if strings.HasPrefix(key, "github-stats-test:metrics:index:") {
+			shardedKeys++
+		}
+	}
+	if shardedKeys == 0 {
+		t.Fatalf("expected sharded metric index keys to be used")
+	}
+
+	snapshot := store.Snapshot()
+	if len(snapshot) != 2 {
+		t.Fatalf("Snapshot() len = %d, want 2", len(snapshot))
 	}
 }

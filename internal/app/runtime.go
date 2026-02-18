@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,10 +18,15 @@ import (
 	"go.uber.org/zap"
 )
 
+const unknownLabelValue = "unknown"
+
 type runtimeStore interface {
 	UpsertMetric(role store.RuntimeRole, source store.WriteSource, point store.MetricPoint) error
 	AcquireJobLock(jobID string, ttl time.Duration, now time.Time) bool
 	Acquire(key string, ttl time.Duration, now time.Time) bool
+	SetCheckpoint(org, repo string, checkpoint time.Time) error
+	GetCheckpoint(org, repo string) (time.Time, bool, error)
+	Healthy(ctx context.Context) bool
 	Snapshot() []store.MetricPoint
 	GC(now time.Time)
 }
@@ -29,6 +35,8 @@ type runtimeQueue interface {
 	Publish(msg backfill.Message) error
 	Consume(ctx context.Context, handler func(backfill.Message) error, maxMessageAge time.Duration, nowFn func() time.Time)
 	Depth() int
+	OldestMessageAge(now time.Time) time.Duration
+	Healthy(ctx context.Context) bool
 }
 
 // Runtime is the application runtime orchestrator.
@@ -57,6 +65,7 @@ type Runtime struct {
 
 	leaderCancel   context.CancelFunc
 	followerCancel context.CancelFunc
+	probeCancel    context.CancelFunc
 
 	// Now is injected for deterministic tests.
 	Now func() time.Time
@@ -89,6 +98,9 @@ func NewRuntime(cfg *config.Config, orgScraper scrape.OrgScraper, logger ...*zap
 	}
 
 	storeBackend, queueBackend := newRuntimeBackends(cfg, baseLogger, retention, maxSeries)
+	if checkpointAware, ok := orgScraper.(scrape.CheckpointAwareScraper); ok {
+		checkpointAware.SetCheckpointStore(storeBackend)
+	}
 	dispatcher := backfill.NewDispatcher(backfill.Config{
 		CoalesceWindow:             cfg.Backfill.CoalesceWindow,
 		DedupTTL:                   cfg.Backfill.DedupTTL,
@@ -155,6 +167,7 @@ func (r *Runtime) StartLeader(ctx context.Context) {
 	r.githubClientUsable = true
 	r.consumerHealthy = false
 	r.mu.Unlock()
+	r.startDependencyProbeLoop(ctx)
 	interval := r.leaderInterval()
 	orgCount := len(r.cfg.GitHub.Orgs)
 	r.logger.Info(
@@ -181,6 +194,10 @@ func (r *Runtime) StopLeader() {
 		r.leaderCancel()
 		r.leaderCancel = nil
 	}
+	if r.probeCancel != nil {
+		r.probeCancel()
+		r.probeCancel = nil
+	}
 	r.schedulerHealthy = false
 	r.logger.Info("stopped leader loop")
 }
@@ -199,6 +216,7 @@ func (r *Runtime) StartFollower(ctx context.Context) {
 	r.githubClientUsable = false
 	r.consumerHealthy = false
 	r.mu.Unlock()
+	r.startDependencyProbeLoop(ctx)
 	r.logger.Info(
 		"starting follower loop",
 		zap.Int("queue_depth", r.queue.Depth()),
@@ -215,6 +233,10 @@ func (r *Runtime) StopFollower() {
 	if r.followerCancel != nil {
 		r.followerCancel()
 		r.followerCancel = nil
+	}
+	if r.probeCancel != nil {
+		r.probeCancel()
+		r.probeCancel = nil
 	}
 	r.consumerHealthy = false
 	r.logger.Info("stopped follower loop")
@@ -281,7 +303,15 @@ func (r *Runtime) processLeaderOutcomes(now time.Time, cycleStart time.Time, out
 				"org":    outcome.Org,
 				"result": "failure",
 			})
+			r.recordLeaderCycleMetricBestEffort(
+				now,
+				"gh_exporter_scrape_duration_seconds",
+				time.Since(cycleStart).Seconds(),
+				map[string]string{"org": outcome.Org},
+			)
 			r.recordGitHubRateLimitMetrics(now, outcome.Org, outcome.Result.Summary)
+			r.recordGitHubRequestMetrics(now, outcome.Org, outcome.Result.Summary)
+			r.recordLOCFallbackMetrics(now, outcome.Org, outcome.Result.Summary)
 			r.logger.Warn("organization scrape failed", zap.String("org", outcome.Org), zap.Error(outcome.Err))
 			orgFailures++
 			if resultErr == nil {
@@ -322,7 +352,15 @@ func (r *Runtime) processLeaderOutcomes(now time.Time, cycleStart time.Time, out
 			"org":    outcome.Org,
 			"result": "success",
 		})
+		r.recordLeaderCycleMetricBestEffort(
+			now,
+			"gh_exporter_scrape_duration_seconds",
+			time.Since(cycleStart).Seconds(),
+			map[string]string{"org": outcome.Org},
+		)
 		r.recordGitHubRateLimitMetrics(now, outcome.Org, outcome.Result.Summary)
+		r.recordGitHubRequestMetrics(now, outcome.Org, outcome.Result.Summary)
+		r.recordLOCFallbackMetrics(now, outcome.Org, outcome.Result.Summary)
 		r.logger.Debug("organization scrape succeeded", zap.String("org", outcome.Org), zap.Int("metric_points", len(outcome.Result.Metrics)))
 		r.logger.Debug(
 			"organization scrape summary",
@@ -443,6 +481,7 @@ func (r *Runtime) processLeaderOutcomes(now time.Time, cycleStart time.Time, out
 	r.mu.RUnlock()
 
 	r.recordDependencyHealthMetrics(now)
+	r.recordLeaderQueueAgeMetric(now)
 	r.store.GC(now)
 
 	r.logger.Info(
@@ -560,6 +599,8 @@ func (r *Runtime) runFollowerLoop(ctx context.Context) {
 }
 
 func (r *Runtime) processBackfillMessage(ctx context.Context, msg backfill.Message, lockTTL time.Duration) error {
+	defer r.recordFollowerQueueAgeMetric(r.Now())
+
 	lockID := msg.JobID
 	if msg.JobID != "" && msg.Attempt > 0 {
 		lockID = fmt.Sprintf("%s:%d", msg.JobID, msg.Attempt)
@@ -650,6 +691,46 @@ func (r *Runtime) processBackfillMessage(ctx context.Context, msg backfill.Messa
 		zap.Int("queue_depth", r.queue.Depth()),
 	)
 	return nil
+}
+
+func (r *Runtime) startDependencyProbeLoop(ctx context.Context) {
+	r.mu.Lock()
+	if r.probeCancel != nil {
+		r.probeCancel()
+	}
+	probeCtx, cancel := context.WithCancel(ctx)
+	r.probeCancel = cancel
+	r.mu.Unlock()
+
+	interval := r.cfg.Health.GitHubProbeInterval
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		r.probeDependencies(probeCtx)
+		for {
+			select {
+			case <-probeCtx.Done():
+				return
+			case <-ticker.C:
+				r.probeDependencies(probeCtx)
+			}
+		}
+	}()
+}
+
+func (r *Runtime) probeDependencies(ctx context.Context) {
+	redisHealthy := r.store.Healthy(ctx)
+	amqpHealthy := r.queue.Healthy(ctx)
+
+	r.mu.Lock()
+	r.redisHealthy = redisHealthy
+	r.amqpHealthy = amqpHealthy
+	r.mu.Unlock()
 }
 
 func (r *Runtime) leaderInterval() time.Duration {
@@ -750,6 +831,7 @@ func (r *Runtime) runCooldownCycle(now time.Time) error {
 
 	r.recordLeaderCycleMetricBestEffort(now, "gh_exporter_leader_cycle_last_run_unixtime", float64(now.Unix()), nil)
 	r.recordDependencyHealthMetrics(now)
+	r.recordLeaderQueueAgeMetric(now)
 	r.store.GC(now)
 	return nil
 }
@@ -789,6 +871,7 @@ func (r *Runtime) runCooldownCycleForOrg(now time.Time, org config.GitHubOrgConf
 
 	r.recordLeaderCycleMetricBestEffort(now, "gh_exporter_leader_cycle_last_run_unixtime", float64(now.Unix()), nil)
 	r.recordDependencyHealthMetrics(now)
+	r.recordLeaderQueueAgeMetric(now)
 	r.store.GC(now)
 	return nil
 }
@@ -844,6 +927,71 @@ func (r *Runtime) recordGitHubRateLimitMetrics(now time.Time, org string, summar
 			zap.Int64("reset_unixtime", summary.RateLimitResetUnix),
 		)
 	}
+}
+
+func (r *Runtime) recordGitHubRequestMetrics(now time.Time, org string, summary scrape.OrgSummary) {
+	for key, value := range summary.GitHubRequestTotals {
+		if value <= 0 {
+			continue
+		}
+		parts := strings.SplitN(key, "|", 2)
+		endpoint := unknownLabelValue
+		statusClass := unknownLabelValue
+		if len(parts) > 0 && strings.TrimSpace(parts[0]) != "" {
+			endpoint = strings.TrimSpace(parts[0])
+		}
+		if len(parts) == 2 && strings.TrimSpace(parts[1]) != "" {
+			statusClass = strings.TrimSpace(parts[1])
+		}
+		r.recordLeaderCycleMetricBestEffort(
+			now,
+			"gh_exporter_github_requests_total",
+			float64(value),
+			map[string]string{
+				"org":          org,
+				"endpoint":     endpoint,
+				"status_class": statusClass,
+			},
+		)
+	}
+}
+
+func (r *Runtime) recordLOCFallbackMetrics(now time.Time, org string, summary scrape.OrgSummary) {
+	if summary.LOCFallbackBudgetHits <= 0 {
+		return
+	}
+	r.recordLeaderCycleMetricBestEffort(
+		now,
+		"gh_exporter_loc_fallback_budget_exhausted_total",
+		float64(summary.LOCFallbackBudgetHits),
+		map[string]string{"org": org},
+	)
+}
+
+func (r *Runtime) recordLeaderQueueAgeMetric(now time.Time) {
+	r.recordLeaderCycleMetricBestEffort(
+		now,
+		"gh_exporter_queue_oldest_message_age_seconds",
+		r.queue.OldestMessageAge(now).Seconds(),
+		map[string]string{"queue": r.backfillQueueName()},
+	)
+}
+
+func (r *Runtime) recordFollowerQueueAgeMetric(now time.Time) {
+	r.recordFollowerMetricBestEffort(
+		now,
+		"gh_exporter_queue_oldest_message_age_seconds",
+		r.queue.OldestMessageAge(now).Seconds(),
+		map[string]string{"queue": r.backfillQueueName()},
+	)
+}
+
+func (r *Runtime) backfillQueueName() string {
+	queueName := strings.TrimSpace(r.cfg.AMQP.Queue)
+	if queueName == "" {
+		return "gh.backfill.jobs"
+	}
+	return queueName
 }
 
 func (r *Runtime) installationIDLabel(org string) string {

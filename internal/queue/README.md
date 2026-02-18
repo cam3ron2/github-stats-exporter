@@ -8,7 +8,8 @@ The `queue` package provides queue abstractions with both in-memory and RabbitMQ
 - `RetryPolicy` maps current attempt to the next delay and enforces maximum attempts.
 - `InMemoryBroker` supports named queues with bounded buffers.
 - `RabbitMQHTTPBroker` uses RabbitMQ management API endpoints for publish/poll/depth operations and supports the same consumer retry contract.
-- Consumer flow supports message-age dropping, retries with backoff, and dead-letter routing.
+- Consumer flow supports message-age dropping, retries with backoff, retry-queue routing, and dead-letter routing.
+- RabbitMQ topology declaration supports exchange/main queue/DLQ/retry queues with TTL + dead-letter policies.
 
 ## API reference
 
@@ -16,10 +17,12 @@ The `queue` package provides queue abstractions with both in-memory and RabbitMQ
 
 - `Message`: queue payload with metadata and headers.
 - `RetryPolicy`: retry configuration (`MaxAttempts`, `Delays`).
-- `ConsumerConfig`: consumer controls (`MaxMessageAge`, retry policy, dead-letter queue, time/sleep hooks).
+- `ConsumerConfig`: consumer controls (`MaxMessageAge`, retry policy, retry queues, dead-letter queue, time/sleep hooks).
 - `Handler`: consumer callback function.
 - `InMemoryBroker`: named in-memory queue broker.
 - `RabbitMQHTTPConfig`: configuration for RabbitMQ management API access.
+- `RetryQueueSpec`: delayed retry queue declaration (`Name`, `Delay`).
+- `TopologyConfig`: exchange queue topology declaration input.
 - `RabbitMQHTTPBroker`: RabbitMQ-backed broker implementation.
 
 ### Functions
@@ -35,6 +38,9 @@ The `queue` package provides queue abstractions with both in-memory and RabbitMQ
 - `(*InMemoryBroker) Publish(ctx context.Context, queue string, msg Message) error`: publishes a message to a queue.
 - `(*InMemoryBroker) Consume(ctx context.Context, queue string, cfg ConsumerConfig, handler Handler)`: consumes and processes messages until context cancellation.
 - `(*InMemoryBroker) Depth(queue string) int`: returns pending message count for a queue.
+- `(*InMemoryBroker) Health(ctx context.Context, queue string) error`: validates queue availability for readiness probes.
 - `(*RabbitMQHTTPBroker) Publish(ctx context.Context, queue string, msg Message) error`: publishes a message via RabbitMQ exchange routing key.
 - `(*RabbitMQHTTPBroker) Consume(ctx context.Context, queue string, cfg ConsumerConfig, handler Handler)`: polls and processes queue messages until context cancellation.
 - `(*RabbitMQHTTPBroker) Depth(queue string) int`: returns queue depth from RabbitMQ queue metadata.
+- `(*RabbitMQHTTPBroker) Health(ctx context.Context, queue string) error`: validates queue metadata fetch for readiness probes.
+- `(*RabbitMQHTTPBroker) EnsureTopology(ctx context.Context, cfg TopologyConfig) error`: declares exchange/queue/binding resources and retry queue policies.

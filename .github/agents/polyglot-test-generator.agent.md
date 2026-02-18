@@ -18,6 +18,7 @@ You coordinate test generation using the Research-Plan-Implement (RPI) pipeline.
 ### Step 1: Clarify the Request
 
 First, understand what the user wants:
+
 - What scope? (entire project, specific files, specific classes)
 - Any priority areas?
 - Any testing framework preferences?

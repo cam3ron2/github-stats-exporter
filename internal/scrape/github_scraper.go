@@ -23,6 +23,10 @@ const (
 	repoMissReasonActivityComments = "activity_issue_comments_failed"
 	userLabelUnlinkedGitAuthor     = "unlinked_git_author"
 	userLabelUnattributedCommit    = "unattributed_commit"
+	locModeStatsContributors       = "stats_contributors"
+	locModeSampledCommitStats      = "sampled_commit_stats"
+	internalMetricLOCSourceMode    = "gh_exporter_loc_source_mode"
+	internalMetricLOCFallbackIncom = "gh_exporter_loc_fallback_incomplete"
 )
 
 // GitHubDataClient is the typed GitHub API interface consumed by the org scraper.
@@ -44,6 +48,7 @@ type GitHubOrgScraperConfig struct {
 	FallbackMaxCommitDetailCallsPerOrgPerHour int
 	LargeRepoZeroDetectionWindows             int
 	LargeRepoCooldown                         time.Duration
+	Checkpoints                               CheckpointStore
 	Now                                       func() time.Time
 	Sleep                                     func(time.Duration)
 }
@@ -54,6 +59,7 @@ type GitHubOrgScraper struct {
 	cfg     GitHubOrgScraperConfig
 
 	stateMachine githubapi.LOCStateMachine
+	checkpoints  CheckpointStore
 
 	mu                    sync.Mutex
 	locStateByRepo        map[string]githubapi.LOCState
@@ -76,6 +82,7 @@ type orgRateLimitSummary struct {
 	minRemaining int
 	resetUnix    int64
 	secondaryHit int
+	requests     map[string]int
 }
 
 type repoSummaryDelta struct {
@@ -89,6 +96,7 @@ type repoSummaryDelta struct {
 	noCompleteWeek     int
 	fallbackUsed       int
 	fallbackTruncated  int
+	fallbackBudgetHits int
 }
 
 // NewGitHubOrgScraper creates a production org scraper over per-org GitHub clients.
@@ -120,9 +128,20 @@ func NewGitHubOrgScraper(clients map[string]GitHubDataClient, cfg GitHubOrgScrap
 			ZeroDetectionWindows:  cfg.LargeRepoZeroDetectionWindows,
 			FallbackCooldown:      cfg.LargeRepoCooldown,
 		},
+		checkpoints:           cfg.Checkpoints,
 		locStateByRepo:        make(map[string]githubapi.LOCState),
 		fallbackOrgBudgetByHr: make(map[string]orgFallbackBudget),
 	}
+}
+
+// SetCheckpointStore injects or replaces checkpoint persistence for the scraper.
+func (s *GitHubOrgScraper) SetCheckpointStore(checkpoints CheckpointStore) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.checkpoints = checkpoints
 }
 
 // ScrapeOrg scrapes one organization and returns metrics plus missed windows for partial failures.
@@ -138,12 +157,15 @@ func (s *GitHubOrgScraper) ScrapeOrg(ctx context.Context, org config.GitHubOrgCo
 	}
 	rateSummary := orgRateLimitSummary{
 		minRemaining: -1,
+		requests:     make(map[string]int),
 	}
 
 	reposResult, err := client.ListOrgRepos(ctx, orgName)
 	if err != nil {
+		rateSummary.observeRequest("list_org_repos", "error")
 		return OrgResult{}, fmt.Errorf("list org repos for %q: %w", orgName, err)
 	}
+	rateSummary.observeRequest("list_org_repos", endpointStatusClass(reposResult.Status))
 	s.applyRateLimitPacing(reposResult.Metadata, &rateSummary)
 
 	if reposResult.Status != githubapi.EndpointStatusOK {
@@ -159,10 +181,11 @@ func (s *GitHubOrgScraper) ScrapeOrg(ctx context.Context, org config.GitHubOrgCo
 	repos := filterRepositories(reposResult.Repos, org.RepoAllowlist)
 	result.Summary.ReposTargeted = len(repos)
 	if len(repos) == 0 {
-		minRemaining, resetUnix, secondaryHits := rateSummary.snapshot()
+		minRemaining, resetUnix, secondaryHits, requestTotals := rateSummary.snapshot()
 		result.Summary.RateLimitMinRemaining = minRemaining
 		result.Summary.RateLimitResetUnix = resetUnix
 		result.Summary.SecondaryLimitHits = secondaryHits
+		result.Summary.GitHubRequestTotals = requestTotals
 		return result, nil
 	}
 
@@ -205,13 +228,15 @@ func (s *GitHubOrgScraper) ScrapeOrg(ctx context.Context, org config.GitHubOrgCo
 		result.Summary.ReposNoCompleteWeek += outcome.summaryDelta.noCompleteWeek
 		result.Summary.ReposFallbackUsed += outcome.summaryDelta.fallbackUsed
 		result.Summary.ReposFallbackTruncated += outcome.summaryDelta.fallbackTruncated
+		result.Summary.LOCFallbackBudgetHits += outcome.summaryDelta.fallbackBudgetHits
 	}
 	result.Summary.MissedWindows = len(result.MissedWindow)
 	result.Summary.MetricsProduced = len(result.Metrics)
-	minRemaining, resetUnix, secondaryHits := rateSummary.snapshot()
+	minRemaining, resetUnix, secondaryHits, requestTotals := rateSummary.snapshot()
 	result.Summary.RateLimitMinRemaining = minRemaining
 	result.Summary.RateLimitResetUnix = resetUnix
 	result.Summary.SecondaryLimitHits = secondaryHits
+	result.Summary.GitHubRequestTotals = requestTotals
 
 	return result, nil
 }
@@ -227,6 +252,14 @@ func (s *GitHubOrgScraper) scrapeRepository(
 	locWindowStart := now.Add(-7 * 24 * time.Hour)
 	activityWindowStart := now.Add(-24 * time.Hour)
 	windowEnd := now
+	if checkpoint, found := s.readCheckpoint(org, repo); found {
+		if checkpoint.Before(activityWindowStart) {
+			activityWindowStart = checkpoint
+		}
+		if checkpoint.Before(locWindowStart) {
+			locWindowStart = checkpoint
+		}
+	}
 	outcome := repositoryOutcome{
 		summaryDelta: repoSummaryDelta{processed: 1},
 	}
@@ -242,7 +275,11 @@ func (s *GitHubOrgScraper) scrapeRepository(
 	)
 	locOutcome := s.scrapeRepositoryLOC(ctx, client, org, repo, locWindowStart, windowEnd, now, rateSummary)
 
-	return mergeRepositoryOutcome(outcome, mergeRepositoryOutcome(activityOutcome, locOutcome))
+	merged := mergeRepositoryOutcome(outcome, mergeRepositoryOutcome(activityOutcome, locOutcome))
+	if len(merged.missed) == 0 {
+		s.advanceCheckpoint(org, repo, windowEnd)
+	}
+	return merged
 }
 
 func (s *GitHubOrgScraper) scrapeRepositoryLOC(
@@ -259,6 +296,7 @@ func (s *GitHubOrgScraper) scrapeRepositoryLOC(
 
 	statsResult, err := client.GetContributorStats(ctx, org, repo)
 	if err != nil {
+		rateSummary.observeRequest("get_contributor_stats", "error")
 		outcome.summaryDelta.statsUnavailable++
 		return mergeRepositoryOutcome(outcome, repositoryOutcome{
 			missed: []MissedWindow{{
@@ -270,6 +308,7 @@ func (s *GitHubOrgScraper) scrapeRepositoryLOC(
 			}},
 		})
 	}
+	rateSummary.observeRequest("get_contributor_stats", endpointStatusClass(statsResult.Status))
 	s.applyRateLimitPacing(statsResult.Metadata, rateSummary)
 
 	switch statsResult.Status {
@@ -336,6 +375,14 @@ func (s *GitHubOrgScraper) scrapeRepositoryLOC(
 	if s.cfg.FallbackEnabled && state.Mode == githubapi.LOCModeFallback {
 		fallbackOutcome := s.scrapeRepositoryFallback(ctx, client, org, repo, windowStart, windowEnd, rateSummary)
 		fallbackOutcome.summaryDelta.fallbackUsed++
+		fallbackIncomplete := 0.0
+		if fallbackOutcome.summaryDelta.fallbackTruncated > 0 {
+			fallbackIncomplete = 1
+		}
+		fallbackOutcome.metrics = append(
+			fallbackOutcome.metrics,
+			buildLOCSourceModeMetrics(org, repo, locModeSampledCommitStats, fallbackIncomplete, observedAt)...,
+		)
 		return mergeRepositoryOutcome(outcome, fallbackOutcome)
 	}
 
@@ -364,6 +411,10 @@ func (s *GitHubOrgScraper) scrapeRepositoryLOC(
 			metrics = append(metrics, removedMetric)
 		}
 	}
+	metrics = append(
+		metrics,
+		buildLOCSourceModeMetrics(org, repo, locModeStatsContributors, 0, observedAt)...,
+	)
 
 	return mergeRepositoryOutcome(outcome, repositoryOutcome{metrics: metrics})
 }
@@ -400,9 +451,11 @@ func (s *GitHubOrgScraper) scrapeRepositoryActivity(
 
 	commitsResult, err := client.ListRepoCommitsWindow(ctx, org, repo, windowStart, windowEnd, 0)
 	if err != nil {
+		rateSummary.observeRequest("list_repo_commits_window", "error")
 		summary.statsUnavailable++
 		addMissedWindow(repoMissReasonActivityCommits)
 	} else {
+		rateSummary.observeRequest("list_repo_commits_window", endpointStatusClass(commitsResult.Status))
 		s.applyRateLimitPacing(commitsResult.Metadata, rateSummary)
 		switch commitsResult.Status {
 		case githubapi.EndpointStatusOK:
@@ -430,9 +483,11 @@ func (s *GitHubOrgScraper) scrapeRepositoryActivity(
 
 	pullsResult, err := client.ListRepoPullRequestsWindow(ctx, org, repo, windowStart, windowEnd)
 	if err != nil {
+		rateSummary.observeRequest("list_repo_pull_requests_window", "error")
 		summary.statsUnavailable++
 		addMissedWindow(repoMissReasonActivityPulls)
 	} else {
+		rateSummary.observeRequest("list_repo_pull_requests_window", endpointStatusClass(pullsResult.Status))
 		s.applyRateLimitPacing(pullsResult.Metadata, rateSummary)
 		switch pullsResult.Status {
 		case githubapi.EndpointStatusOK:
@@ -451,10 +506,12 @@ func (s *GitHubOrgScraper) scrapeRepositoryActivity(
 
 				reviewsResult, reviewErr := client.ListPullReviews(ctx, org, repo, pr.Number, windowStart, windowEnd)
 				if reviewErr != nil {
+					rateSummary.observeRequest("list_pull_reviews", "error")
 					summary.statsUnavailable++
 					addMissedWindow(repoMissReasonActivityReviews)
 					continue
 				}
+				rateSummary.observeRequest("list_pull_reviews", endpointStatusClass(reviewsResult.Status))
 				s.applyRateLimitPacing(reviewsResult.Metadata, rateSummary)
 
 				switch reviewsResult.Status {
@@ -493,9 +550,11 @@ func (s *GitHubOrgScraper) scrapeRepositoryActivity(
 
 	commentsResult, err := client.ListIssueCommentsWindow(ctx, org, repo, windowStart, windowEnd)
 	if err != nil {
+		rateSummary.observeRequest("list_issue_comments", "error")
 		summary.statsUnavailable++
 		addMissedWindow(repoMissReasonActivityComments)
 	} else {
+		rateSummary.observeRequest("list_issue_comments", endpointStatusClass(commentsResult.Status))
 		s.applyRateLimitPacing(commentsResult.Metadata, rateSummary)
 		switch commentsResult.Status {
 		case githubapi.EndpointStatusOK:
@@ -578,6 +637,7 @@ func (s *GitHubOrgScraper) scrapeRepositoryFallback(
 
 	commitListResult, err := client.ListRepoCommitsWindow(ctx, org, repo, windowStart, windowEnd, s.cfg.FallbackMaxCommitsPerRepoPerWeek)
 	if err != nil {
+		rateSummary.observeRequest("list_repo_commits_window", "error")
 		summary.statsUnavailable++
 		return repositoryOutcome{
 			missed: []MissedWindow{{
@@ -590,6 +650,7 @@ func (s *GitHubOrgScraper) scrapeRepositoryFallback(
 			summaryDelta: summary,
 		}
 	}
+	rateSummary.observeRequest("list_repo_commits_window", endpointStatusClass(commitListResult.Status))
 	s.applyRateLimitPacing(commitListResult.Metadata, rateSummary)
 
 	switch commitListResult.Status {
@@ -611,10 +672,13 @@ func (s *GitHubOrgScraper) scrapeRepositoryFallback(
 		}
 	}
 
-	allowedDetails := s.consumeFallbackBudget(org, len(commitListResult.Commits), windowEnd)
+	allowedDetails, budgetExhausted := s.consumeFallbackBudget(org, len(commitListResult.Commits), windowEnd)
 	if allowedDetails < len(commitListResult.Commits) {
 		commitListResult.Commits = commitListResult.Commits[:allowedDetails]
 		commitListResult.Truncated = true
+		if budgetExhausted {
+			summary.fallbackBudgetHits++
+		}
 	}
 
 	addedByUser := make(map[string]int)
@@ -624,6 +688,7 @@ func (s *GitHubOrgScraper) scrapeRepositoryFallback(
 	for _, commit := range commitListResult.Commits {
 		detailResult, err := client.GetCommit(ctx, org, repo, commit.SHA)
 		if err != nil {
+			rateSummary.observeRequest("get_commit", "error")
 			summary.statsUnavailable++
 			missed = append(missed, MissedWindow{
 				Org:         org,
@@ -634,6 +699,7 @@ func (s *GitHubOrgScraper) scrapeRepositoryFallback(
 			})
 			continue
 		}
+		rateSummary.observeRequest("get_commit", endpointStatusClass(detailResult.Status))
 		s.applyRateLimitPacing(detailResult.Metadata, rateSummary)
 
 		switch detailResult.Status {
@@ -724,6 +790,7 @@ func (s *GitHubOrgScraper) ScrapeBackfill(
 
 	rateSummary := orgRateLimitSummary{
 		minRemaining: -1,
+		requests:     make(map[string]int),
 	}
 	result := OrgResult{}
 	repoName := strings.TrimSpace(repo)
@@ -732,8 +799,10 @@ func (s *GitHubOrgScraper) ScrapeBackfill(
 	if repoName == "" || repoName == "*" {
 		reposResult, err := client.ListOrgRepos(ctx, orgName)
 		if err != nil {
+			rateSummary.observeRequest("list_org_repos", "error")
 			return OrgResult{}, fmt.Errorf("list org repos for %q: %w", orgName, err)
 		}
+		rateSummary.observeRequest("list_org_repos", endpointStatusClass(reposResult.Status))
 		s.applyRateLimitPacing(reposResult.Metadata, &rateSummary)
 		if reposResult.Status != githubapi.EndpointStatusOK {
 			return OrgResult{}, fmt.Errorf("list org repos for %q returned status %q", orgName, reposResult.Status)
@@ -765,14 +834,16 @@ func (s *GitHubOrgScraper) ScrapeBackfill(
 		result.Summary.ReposNoCompleteWeek += outcome.summaryDelta.noCompleteWeek
 		result.Summary.ReposFallbackUsed += outcome.summaryDelta.fallbackUsed
 		result.Summary.ReposFallbackTruncated += outcome.summaryDelta.fallbackTruncated
+		result.Summary.LOCFallbackBudgetHits += outcome.summaryDelta.fallbackBudgetHits
 	}
 
 	result.Summary.MissedWindows = len(result.MissedWindow)
 	result.Summary.MetricsProduced = len(result.Metrics)
-	minRemaining, resetUnix, secondaryHits := rateSummary.snapshot()
+	minRemaining, resetUnix, secondaryHits, requestTotals := rateSummary.snapshot()
 	result.Summary.RateLimitMinRemaining = minRemaining
 	result.Summary.RateLimitResetUnix = resetUnix
 	result.Summary.SecondaryLimitHits = secondaryHits
+	result.Summary.GitHubRequestTotals = requestTotals
 
 	return result, nil
 }
@@ -796,14 +867,26 @@ func (s *GitHubOrgScraper) scrapeRepositoryBackfill(
 	switch normalizedReason {
 	case repoMissReasonActivityCommits, repoMissReasonActivityPulls, repoMissReasonActivityReviews, repoMissReasonActivityComments:
 		activityOutcome := s.scrapeRepositoryActivity(ctx, client, org, repo, windowStart, windowEnd, rateSummary)
-		return mergeRepositoryOutcome(outcome, activityOutcome)
+		merged := mergeRepositoryOutcome(outcome, activityOutcome)
+		if len(merged.missed) == 0 && !windowEnd.IsZero() {
+			s.advanceCheckpoint(org, repo, windowEnd)
+		}
+		return merged
 	case repoMissReasonContributorStats, repoMissReasonFallbackList, repoMissReasonFallbackDetail, "fallback_truncated":
 		locOutcome := s.scrapeRepositoryLOC(ctx, client, org, repo, windowStart, windowEnd, now, rateSummary)
-		return mergeRepositoryOutcome(outcome, locOutcome)
+		merged := mergeRepositoryOutcome(outcome, locOutcome)
+		if len(merged.missed) == 0 && !windowEnd.IsZero() {
+			s.advanceCheckpoint(org, repo, windowEnd)
+		}
+		return merged
 	default:
 		activityOutcome := s.scrapeRepositoryActivity(ctx, client, org, repo, windowStart, windowEnd, rateSummary)
 		locOutcome := s.scrapeRepositoryLOC(ctx, client, org, repo, windowStart, windowEnd, now, rateSummary)
-		return mergeRepositoryOutcome(outcome, mergeRepositoryOutcome(activityOutcome, locOutcome))
+		merged := mergeRepositoryOutcome(outcome, mergeRepositoryOutcome(activityOutcome, locOutcome))
+		if len(merged.missed) == 0 && !windowEnd.IsZero() {
+			s.advanceCheckpoint(org, repo, windowEnd)
+		}
+		return merged
 	}
 }
 
@@ -819,12 +902,50 @@ func (s *GitHubOrgScraper) recordLOCState(org, repo string, event githubapi.LOCE
 	return next
 }
 
-func (s *GitHubOrgScraper) consumeFallbackBudget(org string, requested int, now time.Time) int {
+func (s *GitHubOrgScraper) readCheckpoint(org, repo string) (time.Time, bool) {
+	checkpoints := s.checkpointStore()
+	if checkpoints == nil {
+		return time.Time{}, false
+	}
+	checkpoint, found, err := checkpoints.GetCheckpoint(org, repo)
+	if err != nil || !found || checkpoint.IsZero() {
+		return time.Time{}, false
+	}
+	return checkpoint.UTC(), true
+}
+
+func (s *GitHubOrgScraper) advanceCheckpoint(org, repo string, checkpoint time.Time) {
+	if checkpoint.IsZero() {
+		return
+	}
+	checkpoints := s.checkpointStore()
+	if checkpoints == nil {
+		return
+	}
+	current, found, err := checkpoints.GetCheckpoint(org, repo)
+	if err == nil && found && !checkpoint.After(current) {
+		return
+	}
+	if setErr := checkpoints.SetCheckpoint(org, repo, checkpoint.UTC()); setErr != nil {
+		return
+	}
+}
+
+func (s *GitHubOrgScraper) checkpointStore() CheckpointStore {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.checkpoints
+}
+
+func (s *GitHubOrgScraper) consumeFallbackBudget(org string, requested int, now time.Time) (int, bool) {
 	if requested <= 0 {
-		return 0
+		return 0, false
 	}
 	if s.cfg.FallbackMaxCommitDetailCallsPerOrgPerHour <= 0 {
-		return requested
+		return requested, false
 	}
 
 	hourStart := now.UTC().Truncate(time.Hour)
@@ -843,14 +964,16 @@ func (s *GitHubOrgScraper) consumeFallbackBudget(org string, requested int, now 
 	remaining := s.cfg.FallbackMaxCommitDetailCallsPerOrgPerHour - budget.used
 	if remaining <= 0 {
 		s.fallbackOrgBudgetByHr[org] = budget
-		return 0
+		return 0, true
 	}
+	budgetExhausted := false
 	if requested > remaining {
 		requested = remaining
+		budgetExhausted = true
 	}
 	budget.used += requested
 	s.fallbackOrgBudgetByHr[org] = budget
-	return requested
+	return requested, budgetExhausted
 }
 
 func (s *GitHubOrgScraper) applyRateLimitPacing(metadata githubapi.CallMetadata, summary *orgRateLimitSummary) {
@@ -867,6 +990,9 @@ func (s *GitHubOrgScraper) applyRateLimitPacing(metadata githubapi.CallMetadata,
 }
 
 func (s *orgRateLimitSummary) observe(metadata githubapi.CallMetadata) {
+	if s == nil {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -882,10 +1008,51 @@ func (s *orgRateLimitSummary) observe(metadata githubapi.CallMetadata) {
 	}
 }
 
-func (s *orgRateLimitSummary) snapshot() (int, int64, int) {
+func (s *orgRateLimitSummary) observeRequest(endpoint, statusClass string) {
+	if s == nil {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.minRemaining, s.resetUnix, s.secondaryHit
+	if s.requests == nil {
+		s.requests = make(map[string]int)
+	}
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		endpoint = UnknownLabelValue
+	}
+	statusClass = strings.TrimSpace(statusClass)
+	if statusClass == "" {
+		statusClass = UnknownLabelValue
+	}
+	key := endpoint + "|" + statusClass
+	s.requests[key]++
+}
+
+func (s *orgRateLimitSummary) snapshot() (int, int64, int, map[string]int) {
+	if s == nil {
+		return -1, 0, 0, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	requestTotals := make(map[string]int, len(s.requests))
+	for key, value := range s.requests {
+		requestTotals[key] = value
+	}
+	return s.minRemaining, s.resetUnix, s.secondaryHit, requestTotals
+}
+
+func endpointStatusClass(status githubapi.EndpointStatus) string {
+	switch status {
+	case githubapi.EndpointStatusOK, githubapi.EndpointStatusAccepted:
+		return "2xx"
+	case githubapi.EndpointStatusForbidden, githubapi.EndpointStatusNotFound, githubapi.EndpointStatusConflict, githubapi.EndpointStatusUnprocessable:
+		return "4xx"
+	case githubapi.EndpointStatusUnavailable:
+		return "5xx"
+	default:
+		return "unknown"
+	}
 }
 
 func mergeRepositoryOutcome(left, right repositoryOutcome) repositoryOutcome {
@@ -903,9 +1070,52 @@ func mergeRepositoryOutcome(left, right repositoryOutcome) repositoryOutcome {
 			noCompleteWeek:     left.summaryDelta.noCompleteWeek + right.summaryDelta.noCompleteWeek,
 			fallbackUsed:       left.summaryDelta.fallbackUsed + right.summaryDelta.fallbackUsed,
 			fallbackTruncated:  left.summaryDelta.fallbackTruncated + right.summaryDelta.fallbackTruncated,
+			fallbackBudgetHits: left.summaryDelta.fallbackBudgetHits + right.summaryDelta.fallbackBudgetHits,
 		},
 	}
 	return merged
+}
+
+func buildLOCSourceModeMetrics(org, repo, mode string, incomplete float64, updatedAt time.Time) []store.MetricPoint {
+	statsValue := 0.0
+	fallbackValue := 0.0
+	if mode == locModeSampledCommitStats {
+		fallbackValue = 1
+	} else {
+		statsValue = 1
+	}
+
+	return []store.MetricPoint{
+		{
+			Name: internalMetricLOCSourceMode,
+			Labels: map[string]string{
+				LabelOrg:  normalizeRequiredLabel(org),
+				LabelRepo: normalizeRequiredLabel(repo),
+				"mode":    locModeStatsContributors,
+			},
+			Value:     statsValue,
+			UpdatedAt: updatedAt,
+		},
+		{
+			Name: internalMetricLOCSourceMode,
+			Labels: map[string]string{
+				LabelOrg:  normalizeRequiredLabel(org),
+				LabelRepo: normalizeRequiredLabel(repo),
+				"mode":    locModeSampledCommitStats,
+			},
+			Value:     fallbackValue,
+			UpdatedAt: updatedAt,
+		},
+		{
+			Name: internalMetricLOCFallbackIncom,
+			Labels: map[string]string{
+				LabelOrg:  normalizeRequiredLabel(org),
+				LabelRepo: normalizeRequiredLabel(repo),
+			},
+			Value:     incomplete,
+			UpdatedAt: updatedAt,
+		},
+	}
 }
 
 func dedupeMissedWindows(windows []MissedWindow) []MissedWindow {

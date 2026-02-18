@@ -22,6 +22,15 @@ type fakeOrgScraper struct {
 	calls   int
 }
 
+type checkpointAwareFakeScraper struct {
+	fakeOrgScraper
+	checkpoints scrape.CheckpointStore
+}
+
+func (s *checkpointAwareFakeScraper) SetCheckpointStore(checkpoints scrape.CheckpointStore) {
+	s.checkpoints = checkpoints
+}
+
 func (s *fakeOrgScraper) ScrapeOrg(_ context.Context, _ config.GitHubOrgConfig) (scrape.OrgResult, error) {
 	s.calls++
 	index := s.calls - 1
@@ -124,6 +133,58 @@ func TestRuntimeRunLeaderCycleWritesMetrics(t *testing.T) {
 	}
 	if internalMetric.Value != float64(now.Unix()) {
 		t.Fatalf("leader cycle timestamp = %v, want %v", internalMetric.Value, float64(now.Unix()))
+	}
+}
+
+func TestNewRuntimeInjectsCheckpointStore(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	scraper := &checkpointAwareFakeScraper{}
+
+	runtime := NewRuntime(cfg, scraper)
+	if runtime == nil {
+		t.Fatalf("NewRuntime() returned nil")
+	}
+	if scraper.checkpoints == nil {
+		t.Fatalf("checkpoint store was not injected into scraper")
+	}
+}
+
+func TestRuntimeProbeDependenciesUpdatesHealth(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	runtime := NewRuntime(cfg, &fakeOrgScraper{})
+	storeProbe := &healthToggleStore{
+		runtimeStore: runtime.store,
+		healthy:      false,
+	}
+	queueProbe := &healthToggleQueue{
+		runtimeQueue: runtime.queue,
+		healthy:      false,
+	}
+	runtime.store = storeProbe
+	runtime.queue = queueProbe
+
+	runtime.probeDependencies(context.Background())
+	status := runtime.CurrentStatus(context.Background())
+	if status.Components["redis"] {
+		t.Fatalf("redis component health = true, want false")
+	}
+	if status.Components["amqp"] {
+		t.Fatalf("amqp component health = true, want false")
+	}
+
+	storeProbe.healthy = true
+	queueProbe.healthy = true
+	runtime.probeDependencies(context.Background())
+	status = runtime.CurrentStatus(context.Background())
+	if !status.Components["redis"] {
+		t.Fatalf("redis component health = false, want true")
+	}
+	if !status.Components["amqp"] {
+		t.Fatalf("amqp component health = false, want true")
 	}
 }
 
@@ -457,6 +518,127 @@ func TestRuntimeRunLeaderCycleWritesRateLimitMetrics(t *testing.T) {
 	}
 }
 
+func TestRuntimeRunLeaderCycleWritesLOCFallbackBudgetMetrics(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	now := time.Unix(1739836800, 0)
+	runtime := NewRuntime(cfg, &fakeOrgScraper{
+		result: scrape.OrgResult{
+			Summary: scrape.OrgSummary{
+				LOCFallbackBudgetHits: 3,
+			},
+		},
+	})
+	runtime.Now = func() time.Time { return now }
+
+	if err := runtime.RunLeaderCycle(context.Background()); err != nil {
+		t.Fatalf("RunLeaderCycle() unexpected error: %v", err)
+	}
+
+	snapshot := runtime.Store().Snapshot()
+	point := findMetricWithLabels(snapshot, "gh_exporter_loc_fallback_budget_exhausted_total", map[string]string{
+		"org": "org-a",
+	})
+	if point == nil {
+		t.Fatalf("missing gh_exporter_loc_fallback_budget_exhausted_total")
+	}
+	if point.Value != 3 {
+		t.Fatalf("gh_exporter_loc_fallback_budget_exhausted_total = %v, want 3", point.Value)
+	}
+}
+
+func TestRuntimeRunLeaderCycleWritesGitHubRequestMetrics(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	now := time.Unix(1739836800, 0)
+	runtime := NewRuntime(cfg, &fakeOrgScraper{
+		result: scrape.OrgResult{
+			Summary: scrape.OrgSummary{
+				GitHubRequestTotals: map[string]int{
+					"list_org_repos|2xx":          1,
+					"get_contributor_stats|4xx":   2,
+					"list_issue_comments|unknown": 3,
+				},
+			},
+		},
+	})
+	runtime.Now = func() time.Time { return now }
+
+	if err := runtime.RunLeaderCycle(context.Background()); err != nil {
+		t.Fatalf("RunLeaderCycle() unexpected error: %v", err)
+	}
+
+	snapshot := runtime.Store().Snapshot()
+	testCases := []struct {
+		name      string
+		labels    map[string]string
+		wantValue float64
+	}{
+		{
+			name:      "list_org_repos_2xx",
+			labels:    map[string]string{"org": "org-a", "endpoint": "list_org_repos", "status_class": "2xx"},
+			wantValue: 1,
+		},
+		{
+			name:      "get_contributor_stats_4xx",
+			labels:    map[string]string{"org": "org-a", "endpoint": "get_contributor_stats", "status_class": "4xx"},
+			wantValue: 2,
+		},
+		{
+			name:      "list_issue_comments_unknown",
+			labels:    map[string]string{"org": "org-a", "endpoint": "list_issue_comments", "status_class": "unknown"},
+			wantValue: 3,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			point := findMetricWithLabels(snapshot, "gh_exporter_github_requests_total", tc.labels)
+			if point == nil {
+				t.Fatalf("missing gh_exporter_github_requests_total labels=%v", tc.labels)
+			}
+			if point.Value != tc.wantValue {
+				t.Fatalf("value = %v, want %v", point.Value, tc.wantValue)
+			}
+		})
+	}
+}
+
+func TestRuntimeRunLeaderCycleWritesScrapeDurationAndQueueAgeMetrics(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	now := time.Unix(1739836800, 0)
+	runtime := NewRuntime(cfg, &fakeOrgScraper{result: scrape.OrgResult{}})
+	runtime.Now = func() time.Time { return now }
+	runtime.queue = &queueWithOldestAge{age: 90 * time.Second}
+
+	if err := runtime.RunLeaderCycle(context.Background()); err != nil {
+		t.Fatalf("RunLeaderCycle() unexpected error: %v", err)
+	}
+
+	snapshot := runtime.Store().Snapshot()
+	durationMetric := findMetricWithLabels(snapshot, "gh_exporter_scrape_duration_seconds", map[string]string{"org": "org-a"})
+	if durationMetric == nil {
+		t.Fatalf("missing gh_exporter_scrape_duration_seconds")
+	}
+	if durationMetric.Value < 0 {
+		t.Fatalf("gh_exporter_scrape_duration_seconds = %v, want >= 0", durationMetric.Value)
+	}
+
+	queueMetric := findMetricWithLabels(snapshot, "gh_exporter_queue_oldest_message_age_seconds", map[string]string{"queue": "gh.backfill.jobs"})
+	if queueMetric == nil {
+		t.Fatalf("missing gh_exporter_queue_oldest_message_age_seconds")
+	}
+	if queueMetric.Value != 90 {
+		t.Fatalf("gh_exporter_queue_oldest_message_age_seconds = %v, want 90", queueMetric.Value)
+	}
+}
+
 func TestRuntimeRunLeaderCycleRunsStoreGC(t *testing.T) {
 	t.Parallel()
 
@@ -491,6 +673,24 @@ type singleMessageQueue struct {
 	message backfill.Message
 }
 
+type healthToggleStore struct {
+	runtimeStore
+	healthy bool
+}
+
+func (s *healthToggleStore) Healthy(_ context.Context) bool {
+	return s.healthy
+}
+
+type healthToggleQueue struct {
+	runtimeQueue
+	healthy bool
+}
+
+func (q *healthToggleQueue) Healthy(_ context.Context) bool {
+	return q.healthy
+}
+
 func (q *singleMessageQueue) Publish(_ backfill.Message) error {
 	return nil
 }
@@ -506,6 +706,14 @@ func (q *singleMessageQueue) Consume(
 
 func (q *singleMessageQueue) Depth() int {
 	return 0
+}
+
+func (q *singleMessageQueue) OldestMessageAge(_ time.Time) time.Duration {
+	return 0
+}
+
+func (q *singleMessageQueue) Healthy(_ context.Context) bool {
+	return true
 }
 
 type countingConsumeQueue struct {
@@ -533,10 +741,46 @@ func (q *countingConsumeQueue) Depth() int {
 	return 0
 }
 
+func (q *countingConsumeQueue) OldestMessageAge(_ time.Time) time.Duration {
+	return 0
+}
+
+func (q *countingConsumeQueue) Healthy(_ context.Context) bool {
+	return true
+}
+
 func (q *countingConsumeQueue) callCount() int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return q.consumeCalls
+}
+
+type queueWithOldestAge struct {
+	age time.Duration
+}
+
+func (q *queueWithOldestAge) Publish(_ backfill.Message) error {
+	return nil
+}
+
+func (q *queueWithOldestAge) Consume(
+	_ context.Context,
+	_ func(backfill.Message) error,
+	_ time.Duration,
+	_ func() time.Time,
+) {
+}
+
+func (q *queueWithOldestAge) Depth() int {
+	return 0
+}
+
+func (q *queueWithOldestAge) OldestMessageAge(_ time.Time) time.Duration {
+	return q.age
+}
+
+func (q *queueWithOldestAge) Healthy(_ context.Context) bool {
+	return true
 }
 
 type orgCountingScraper struct {

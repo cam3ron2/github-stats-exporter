@@ -29,6 +29,11 @@ type CacheConfig struct {
 	Now             func() time.Time
 }
 
+// CacheStats contains refresh statistics for exporter cache observability.
+type CacheStats struct {
+	RefreshDuration time.Duration
+}
+
 type cachedSnapshotReader struct {
 	source      SnapshotReader
 	incremental incrementalSnapshotReader
@@ -42,6 +47,7 @@ type cachedSnapshotReader struct {
 	lastRefresh time.Time
 	cursor      uint64
 	series      map[string]store.MetricPoint
+	stats       CacheStats
 }
 
 // NewCachedSnapshotReader wraps a snapshot reader with periodic cache refresh.
@@ -87,6 +93,15 @@ func (c *cachedSnapshotReader) Snapshot() []store.MetricPoint {
 	return clonePoints(c.sortedSnapshotLocked())
 }
 
+func (c *cachedSnapshotReader) CacheStats() CacheStats {
+	if c == nil {
+		return CacheStats{}
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.stats
+}
+
 func (c *cachedSnapshotReader) refreshIfNeeded() {
 	now := c.now()
 
@@ -102,12 +117,14 @@ func (c *cachedSnapshotReader) refreshIfNeeded() {
 	if c.initialized && now.Sub(c.lastRefresh) < c.refreshInterval {
 		return
 	}
+	start := now
 
 	if c.mode == cacheModeIncremental && c.incremental != nil && c.initialized {
 		delta, err := c.incremental.SnapshotDelta(c.cursor)
 		if err == nil {
 			c.applyDeltaLocked(delta)
 			c.lastRefresh = now
+			c.stats.RefreshDuration = c.now().Sub(start)
 			return
 		}
 	}
@@ -120,6 +137,7 @@ func (c *cachedSnapshotReader) refreshIfNeeded() {
 	}
 	c.lastRefresh = now
 	c.initialized = true
+	c.stats.RefreshDuration = c.now().Sub(start)
 }
 
 func (c *cachedSnapshotReader) refreshFullLocked() {

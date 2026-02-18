@@ -12,6 +12,28 @@ import (
 	"github.com/cam3ron2/github-stats/internal/store"
 )
 
+type fakeCheckpointStore struct {
+	mu          sync.Mutex
+	checkpoints map[string]time.Time
+}
+
+func (s *fakeCheckpointStore) SetCheckpoint(org, repo string, checkpoint time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.checkpoints == nil {
+		s.checkpoints = make(map[string]time.Time)
+	}
+	s.checkpoints[org+"/"+repo] = checkpoint.UTC()
+	return nil
+}
+
+func (s *fakeCheckpointStore) GetCheckpoint(org, repo string) (time.Time, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	checkpoint, found := s.checkpoints[org+"/"+repo]
+	return checkpoint, found, nil
+}
+
 type fakeGitHubDataClient struct {
 	listOrgReposFn        func(ctx context.Context, org string) (githubapi.OrgReposResult, error)
 	getContributorStatsFn func(ctx context.Context, owner, repo string) (githubapi.ContributorStatsResult, error)
@@ -151,6 +173,327 @@ func TestGitHubOrgScraperPrimaryStats(t *testing.T) {
 				t.Fatalf("ValidateProductivityMetric(%s) unexpected error: %v", point.Name, err)
 			}
 		}
+	}
+}
+
+func TestGitHubOrgScraperPrimaryLOCSourceMetrics(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1739836800, 0).UTC()
+	client := &fakeGitHubDataClient{
+		listOrgReposFn: func(_ context.Context, _ string) (githubapi.OrgReposResult, error) {
+			return githubapi.OrgReposResult{
+				Status: githubapi.EndpointStatusOK,
+				Repos:  []githubapi.Repository{{Name: "repo-a"}},
+			}, nil
+		},
+		getContributorStatsFn: func(_ context.Context, _, _ string) (githubapi.ContributorStatsResult, error) {
+			return githubapi.ContributorStatsResult{
+				Status: githubapi.EndpointStatusOK,
+				Contributors: []githubapi.ContributorStats{
+					{
+						User:         "alice",
+						TotalCommits: 2,
+						Weeks: []githubapi.ContributorWeek{
+							{
+								WeekStart: now.Add(-14 * 24 * time.Hour),
+								Additions: 11,
+								Deletions: 3,
+								Commits:   2,
+							},
+						},
+					},
+				},
+			}, nil
+		},
+	}
+
+	scraper := NewGitHubOrgScraper(map[string]GitHubDataClient{
+		"org-a": client,
+	}, GitHubOrgScraperConfig{
+		Now: func() time.Time { return now },
+	})
+
+	result, err := scraper.ScrapeOrg(context.Background(), config.GitHubOrgConfig{
+		Org:               "org-a",
+		PerOrgConcurrency: 1,
+	})
+	if err != nil {
+		t.Fatalf("ScrapeOrg() unexpected error: %v", err)
+	}
+
+	testCases := []struct {
+		name      string
+		metric    string
+		labels    map[string]string
+		wantValue float64
+	}{
+		{
+			name:   "stats_mode_active",
+			metric: internalMetricLOCSourceMode,
+			labels: map[string]string{
+				LabelOrg:  "org-a",
+				LabelRepo: "repo-a",
+				"mode":    locModeStatsContributors,
+			},
+			wantValue: 1,
+		},
+		{
+			name:   "fallback_mode_inactive",
+			metric: internalMetricLOCSourceMode,
+			labels: map[string]string{
+				LabelOrg:  "org-a",
+				LabelRepo: "repo-a",
+				"mode":    locModeSampledCommitStats,
+			},
+			wantValue: 0,
+		},
+		{
+			name:      "fallback_incomplete_is_zero",
+			metric:    internalMetricLOCFallbackIncom,
+			labels:    map[string]string{LabelOrg: "org-a", LabelRepo: "repo-a"},
+			wantValue: 0,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			metric := findMetricWithLabels(result.Metrics, tc.metric, tc.labels)
+			if metric == nil {
+				t.Fatalf("missing metric %q labels=%v", tc.metric, tc.labels)
+			}
+			if metric.Value != tc.wantValue {
+				t.Fatalf("%s value = %v, want %v", tc.metric, metric.Value, tc.wantValue)
+			}
+		})
+	}
+}
+
+func TestGitHubOrgScraperUsesCheckpointForExtendedWindowAndAdvances(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1739836800, 0).UTC()
+	checkpoint := now.Add(-72 * time.Hour)
+	checkpoints := &fakeCheckpointStore{
+		checkpoints: map[string]time.Time{
+			"org-a/repo-a": checkpoint,
+		},
+	}
+
+	seenCommitWindowStart := time.Time{}
+	client := &fakeGitHubDataClient{
+		listOrgReposFn: func(_ context.Context, _ string) (githubapi.OrgReposResult, error) {
+			return githubapi.OrgReposResult{
+				Status: githubapi.EndpointStatusOK,
+				Repos:  []githubapi.Repository{{Name: "repo-a"}},
+			}, nil
+		},
+		getContributorStatsFn: func(_ context.Context, _, _ string) (githubapi.ContributorStatsResult, error) {
+			return githubapi.ContributorStatsResult{Status: githubapi.EndpointStatusAccepted}, nil
+		},
+		listRepoCommitsFn: func(
+			_ context.Context,
+			_, _ string,
+			since, _ time.Time,
+			_ int,
+		) (githubapi.CommitListResult, error) {
+			seenCommitWindowStart = since
+			return githubapi.CommitListResult{Status: githubapi.EndpointStatusOK}, nil
+		},
+		listRepoPullsFn: func(_ context.Context, _, _ string, _, _ time.Time) (githubapi.PullRequestListResult, error) {
+			return githubapi.PullRequestListResult{Status: githubapi.EndpointStatusOK}, nil
+		},
+		listIssueCommentsFn: func(_ context.Context, _, _ string, _, _ time.Time) (githubapi.IssueCommentsResult, error) {
+			return githubapi.IssueCommentsResult{Status: githubapi.EndpointStatusOK}, nil
+		},
+	}
+
+	scraper := NewGitHubOrgScraper(map[string]GitHubDataClient{
+		"org-a": client,
+	}, GitHubOrgScraperConfig{
+		Checkpoints: checkpoints,
+		Now:         func() time.Time { return now },
+	})
+
+	result, err := scraper.ScrapeOrg(context.Background(), config.GitHubOrgConfig{
+		Org:               "org-a",
+		PerOrgConcurrency: 1,
+	})
+	if err != nil {
+		t.Fatalf("ScrapeOrg() unexpected error: %v", err)
+	}
+	if len(result.MissedWindow) != 0 {
+		t.Fatalf("MissedWindow len = %d, want 0", len(result.MissedWindow))
+	}
+	if !seenCommitWindowStart.Equal(checkpoint) {
+		t.Fatalf("commits since = %s, want %s", seenCommitWindowStart, checkpoint)
+	}
+
+	advanced, found, err := checkpoints.GetCheckpoint("org-a", "repo-a")
+	if err != nil {
+		t.Fatalf("GetCheckpoint() unexpected error: %v", err)
+	}
+	if !found {
+		t.Fatalf("GetCheckpoint() found = false, want true")
+	}
+	if !advanced.Equal(now) {
+		t.Fatalf("checkpoint after scrape = %s, want %s", advanced, now)
+	}
+}
+
+func TestGitHubOrgScraperCheckpointNotAdvancedOnMissedWindow(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1739836800, 0).UTC()
+	checkpoint := now.Add(-72 * time.Hour)
+	checkpoints := &fakeCheckpointStore{
+		checkpoints: map[string]time.Time{
+			"org-a/repo-a": checkpoint,
+		},
+	}
+
+	client := &fakeGitHubDataClient{
+		listOrgReposFn: func(_ context.Context, _ string) (githubapi.OrgReposResult, error) {
+			return githubapi.OrgReposResult{
+				Status: githubapi.EndpointStatusOK,
+				Repos:  []githubapi.Repository{{Name: "repo-a"}},
+			}, nil
+		},
+		getContributorStatsFn: func(_ context.Context, _, _ string) (githubapi.ContributorStatsResult, error) {
+			return githubapi.ContributorStatsResult{Status: githubapi.EndpointStatusAccepted}, nil
+		},
+		listRepoCommitsFn: func(_ context.Context, _, _ string, _, _ time.Time, _ int) (githubapi.CommitListResult, error) {
+			return githubapi.CommitListResult{}, context.DeadlineExceeded
+		},
+		listRepoPullsFn: func(_ context.Context, _, _ string, _, _ time.Time) (githubapi.PullRequestListResult, error) {
+			return githubapi.PullRequestListResult{Status: githubapi.EndpointStatusOK}, nil
+		},
+		listIssueCommentsFn: func(_ context.Context, _, _ string, _, _ time.Time) (githubapi.IssueCommentsResult, error) {
+			return githubapi.IssueCommentsResult{Status: githubapi.EndpointStatusOK}, nil
+		},
+	}
+
+	scraper := NewGitHubOrgScraper(map[string]GitHubDataClient{
+		"org-a": client,
+	}, GitHubOrgScraperConfig{
+		Checkpoints: checkpoints,
+		Now:         func() time.Time { return now },
+	})
+
+	result, err := scraper.ScrapeOrg(context.Background(), config.GitHubOrgConfig{
+		Org:               "org-a",
+		PerOrgConcurrency: 1,
+	})
+	if err != nil {
+		t.Fatalf("ScrapeOrg() unexpected error: %v", err)
+	}
+	if len(result.MissedWindow) == 0 {
+		t.Fatalf("MissedWindow len = 0, want > 0")
+	}
+
+	foundCommitMiss := false
+	for _, missed := range result.MissedWindow {
+		if missed.Reason != repoMissReasonActivityCommits {
+			continue
+		}
+		foundCommitMiss = true
+		if !missed.WindowStart.Equal(checkpoint) {
+			t.Fatalf("missed.WindowStart = %s, want %s", missed.WindowStart, checkpoint)
+		}
+	}
+	if !foundCommitMiss {
+		t.Fatalf("missing %q missed window", repoMissReasonActivityCommits)
+	}
+
+	preserved, found, err := checkpoints.GetCheckpoint("org-a", "repo-a")
+	if err != nil {
+		t.Fatalf("GetCheckpoint() unexpected error: %v", err)
+	}
+	if !found {
+		t.Fatalf("GetCheckpoint() found = false, want true")
+	}
+	if !preserved.Equal(checkpoint) {
+		t.Fatalf("checkpoint after missed window = %s, want %s", preserved, checkpoint)
+	}
+}
+
+func TestGitHubOrgScraperSummarizesGitHubRequests(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1739836800, 0).UTC()
+	client := &fakeGitHubDataClient{
+		listOrgReposFn: func(_ context.Context, _ string) (githubapi.OrgReposResult, error) {
+			return githubapi.OrgReposResult{
+				Status: githubapi.EndpointStatusOK,
+				Repos:  []githubapi.Repository{{Name: "repo-a"}},
+			}, nil
+		},
+		getContributorStatsFn: func(_ context.Context, _, _ string) (githubapi.ContributorStatsResult, error) {
+			return githubapi.ContributorStatsResult{
+				Status: githubapi.EndpointStatusOK,
+				Contributors: []githubapi.ContributorStats{
+					{
+						User: "alice",
+						Weeks: []githubapi.ContributorWeek{
+							{
+								WeekStart: now.Add(-14 * 24 * time.Hour),
+								Additions: 1,
+								Deletions: 1,
+								Commits:   1,
+							},
+						},
+					},
+				},
+			}, nil
+		},
+		listRepoCommitsFn: func(_ context.Context, _, _ string, _, _ time.Time, _ int) (githubapi.CommitListResult, error) {
+			return githubapi.CommitListResult{Status: githubapi.EndpointStatusOK}, nil
+		},
+		listRepoPullsFn: func(_ context.Context, _, _ string, _, _ time.Time) (githubapi.PullRequestListResult, error) {
+			return githubapi.PullRequestListResult{Status: githubapi.EndpointStatusOK}, nil
+		},
+		listIssueCommentsFn: func(_ context.Context, _, _ string, _, _ time.Time) (githubapi.IssueCommentsResult, error) {
+			return githubapi.IssueCommentsResult{Status: githubapi.EndpointStatusOK}, nil
+		},
+	}
+
+	scraper := NewGitHubOrgScraper(map[string]GitHubDataClient{
+		"org-a": client,
+	}, GitHubOrgScraperConfig{
+		Now: func() time.Time { return now },
+	})
+
+	result, err := scraper.ScrapeOrg(context.Background(), config.GitHubOrgConfig{
+		Org:               "org-a",
+		PerOrgConcurrency: 1,
+	})
+	if err != nil {
+		t.Fatalf("ScrapeOrg() unexpected error: %v", err)
+	}
+
+	testCases := []struct {
+		name string
+		key  string
+		want int
+	}{
+		{name: "list_org_repos", key: "list_org_repos|2xx", want: 1},
+		{name: "get_contributor_stats", key: "get_contributor_stats|2xx", want: 1},
+		{name: "list_repo_commits_window", key: "list_repo_commits_window|2xx", want: 1},
+		{name: "list_repo_pull_requests_window", key: "list_repo_pull_requests_window|2xx", want: 1},
+		{name: "list_issue_comments", key: "list_issue_comments|2xx", want: 1},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := result.Summary.GitHubRequestTotals[tc.key]
+			if got != tc.want {
+				t.Fatalf("GitHubRequestTotals[%q] = %d, want %d", tc.key, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -448,6 +791,57 @@ func TestGitHubOrgScraperFallbackBudgetCapsCommitDetails(t *testing.T) {
 	}
 	if result.Summary.ReposFallbackTruncated != 1 {
 		t.Fatalf("ReposFallbackTruncated = %d, want 1", result.Summary.ReposFallbackTruncated)
+	}
+	if result.Summary.LOCFallbackBudgetHits != 1 {
+		t.Fatalf("LOCFallbackBudgetHits = %d, want 1", result.Summary.LOCFallbackBudgetHits)
+	}
+
+	testCases := []struct {
+		name      string
+		metric    string
+		labels    map[string]string
+		wantValue float64
+	}{
+		{
+			name:   "stats_mode_disabled",
+			metric: internalMetricLOCSourceMode,
+			labels: map[string]string{
+				LabelOrg:  "org-a",
+				LabelRepo: "repo-a",
+				"mode":    locModeStatsContributors,
+			},
+			wantValue: 0,
+		},
+		{
+			name:   "fallback_mode_enabled",
+			metric: internalMetricLOCSourceMode,
+			labels: map[string]string{
+				LabelOrg:  "org-a",
+				LabelRepo: "repo-a",
+				"mode":    locModeSampledCommitStats,
+			},
+			wantValue: 1,
+		},
+		{
+			name:      "fallback_incomplete_is_one",
+			metric:    internalMetricLOCFallbackIncom,
+			labels:    map[string]string{LabelOrg: "org-a", LabelRepo: "repo-a"},
+			wantValue: 1,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			metric := findMetricWithLabels(result.Metrics, tc.metric, tc.labels)
+			if metric == nil {
+				t.Fatalf("missing metric %q labels=%v", tc.metric, tc.labels)
+			}
+			if metric.Value != tc.wantValue {
+				t.Fatalf("%s value = %v, want %v", tc.metric, metric.Value, tc.wantValue)
+			}
+		})
 	}
 }
 
@@ -768,6 +1162,26 @@ func findMetric(points []store.MetricPoint, name, org, repo, user string) *store
 			continue
 		}
 		return point
+	}
+	return nil
+}
+
+func findMetricWithLabels(points []store.MetricPoint, name string, labels map[string]string) *store.MetricPoint {
+	for i := range points {
+		point := &points[i]
+		if point.Name != name {
+			continue
+		}
+		match := true
+		for key, value := range labels {
+			if point.Labels[key] != value {
+				match = false
+				break
+			}
+		}
+		if match {
+			return point
+		}
 	}
 	return nil
 }

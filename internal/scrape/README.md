@@ -9,6 +9,7 @@ The `scrape` package coordinates per-organization scrape execution and defines t
 - `GitHubOrgScraper` performs repo iteration per org with bounded worker concurrency.
 - 24h activity metrics are scraped from commits, pull requests, pull reviews, and issue comments endpoints.
 - LOC collection uses `/stats/contributors` as primary and commit-detail fallback when large-repo zeroing is detected.
+- Optional checkpoint persistence extends scrape windows after outages and advances checkpoints on successful repo windows.
 - Partial repo failures are returned as missed windows so runtime can enqueue targeted backfill.
 - `NoopOrgScraper` is a safe default implementation used during bootstrap/testing.
 
@@ -20,6 +21,8 @@ The `scrape` package coordinates per-organization scrape execution and defines t
 - `MissedWindow`: failed repo window metadata (`org`, `repo`, `window_start`, `window_end`, `reason`) used for backfill enqueue.
 - `Outcome`: per-org wrapper with org name, result, and error.
 - `OrgScraper`: org scrape interface.
+- `CheckpointStore`: checkpoint persistence contract (`SetCheckpoint`, `GetCheckpoint`).
+- `CheckpointAwareScraper`: optional interface for runtime checkpoint-store injection.
 - `Manager`: parallel org scrape coordinator.
 - `GitHubDataClient`: typed GitHub endpoint interface used by `GitHubOrgScraper`.
 - `GitHubOrgScraperConfig`: behavior config for LOC fallback, budgets, and time hooks.
@@ -43,4 +46,5 @@ The `scrape` package coordinates per-organization scrape execution and defines t
 
 - `(*Manager) ScrapeAll(ctx context.Context) []Outcome`: executes one parallel scrape pass for all configured orgs.
 - `(*GitHubOrgScraper) ScrapeOrg(ctx context.Context, org config.GitHubOrgConfig) (OrgResult, error)`: scrapes one org, emits metrics, and reports missed windows for partial failures.
+- `(*GitHubOrgScraper) SetCheckpointStore(checkpoints CheckpointStore)`: injects checkpoint persistence after scraper construction.
 - `(*NoopOrgScraper) ScrapeOrg(ctx context.Context, org config.GitHubOrgConfig) (OrgResult, error)`: returns empty output with no error.

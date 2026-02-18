@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"sort"
@@ -56,22 +57,24 @@ type storedMetric struct {
 
 // MemoryStore is an in-memory shared metric store.
 type MemoryStore struct {
-	mu         sync.RWMutex
-	retention  time.Duration
-	maxSeries  int
-	metrics    map[string]storedMetric
-	jobLocks   map[string]time.Time
-	dedupLocks map[string]time.Time
+	mu          sync.RWMutex
+	retention   time.Duration
+	maxSeries   int
+	metrics     map[string]storedMetric
+	jobLocks    map[string]time.Time
+	dedupLocks  map[string]time.Time
+	checkpoints map[string]time.Time
 }
 
 // NewMemoryStore creates a memory store.
 func NewMemoryStore(retention time.Duration, maxSeries int) *MemoryStore {
 	return &MemoryStore{
-		retention:  retention,
-		maxSeries:  maxSeries,
-		metrics:    make(map[string]storedMetric),
-		jobLocks:   make(map[string]time.Time),
-		dedupLocks: make(map[string]time.Time),
+		retention:   retention,
+		maxSeries:   maxSeries,
+		metrics:     make(map[string]storedMetric),
+		jobLocks:    make(map[string]time.Time),
+		dedupLocks:  make(map[string]time.Time),
+		checkpoints: make(map[string]time.Time),
 	}
 }
 
@@ -125,6 +128,53 @@ func (s *MemoryStore) Acquire(key string, ttl time.Duration, now time.Time) bool
 	return s.AcquireDedupLock(key, ttl, now)
 }
 
+// Healthy reports memory store availability.
+func (s *MemoryStore) Healthy(_ context.Context) bool {
+	return s != nil
+}
+
+// SetCheckpoint stores the latest processed timestamp for one org/repo.
+func (s *MemoryStore) SetCheckpoint(org, repo string, checkpoint time.Time) error {
+	if s == nil {
+		return fmt.Errorf("memory store is not initialized")
+	}
+	if strings.TrimSpace(org) == "" {
+		return fmt.Errorf("org is required")
+	}
+	if strings.TrimSpace(repo) == "" {
+		return fmt.Errorf("repo is required")
+	}
+	if checkpoint.IsZero() {
+		return fmt.Errorf("checkpoint time is required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.checkpoints[checkpointKey(org, repo)] = checkpoint.UTC()
+	return nil
+}
+
+// GetCheckpoint returns the last processed timestamp for one org/repo.
+func (s *MemoryStore) GetCheckpoint(org, repo string) (time.Time, bool, error) {
+	if s == nil {
+		return time.Time{}, false, fmt.Errorf("memory store is not initialized")
+	}
+	if strings.TrimSpace(org) == "" {
+		return time.Time{}, false, fmt.Errorf("org is required")
+	}
+	if strings.TrimSpace(repo) == "" {
+		return time.Time{}, false, fmt.Errorf("repo is required")
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	checkpoint, ok := s.checkpoints[checkpointKey(org, repo)]
+	if !ok {
+		return time.Time{}, false, nil
+	}
+	return checkpoint, true, nil
+}
+
 // GC deletes expired metrics and locks.
 func (s *MemoryStore) GC(now time.Time) {
 	s.mu.Lock()
@@ -140,6 +190,13 @@ func (s *MemoryStore) GC(now time.Time) {
 
 	trimExpiredLocks(s.jobLocks, now)
 	trimExpiredLocks(s.dedupLocks, now)
+	if s.retention > 0 {
+		for key, checkpoint := range s.checkpoints {
+			if now.Sub(checkpoint) > s.retention {
+				delete(s.checkpoints, key)
+			}
+		}
+	}
 }
 
 // Snapshot returns all non-expired metrics.
@@ -215,4 +272,8 @@ func trimExpiredLocks(lockMap map[string]time.Time, now time.Time) {
 			delete(lockMap, key)
 		}
 	}
+}
+
+func checkpointKey(org, repo string) string {
+	return strings.TrimSpace(org) + "/" + strings.TrimSpace(repo)
 }

@@ -7,6 +7,8 @@ The `store` package manages shared metric state and distributed locks.
 - `MemoryStore` provides an in-process implementation for tests/local runs.
 - `RedisStore` provides shared HA-compatible storage over Redis.
 - Both implementations enforce role/source write guards and support dedup/job locks.
+- Both implementations persist org/repo checkpoints used for scrape window advancement.
+- Redis indexes metric series by shard (`IndexShards`) to avoid single-set hotspots at high cardinality.
 - Metric retention is handled by GC (memory) and key TTL + index cleanup (Redis).
 
 ## API reference
@@ -19,7 +21,7 @@ The `store` package manages shared metric state and distributed locks.
 - `SnapshotDeltaEvent`: one incremental series change (`SeriesID`, `Point`, `Deleted`).
 - `SnapshotDelta`: incremental change batch with `NextCursor`.
 - `MemoryStore`: in-memory shared store.
-- `RedisStoreConfig`: Redis store settings (`Namespace`, `Retention`, `MaxSeries`).
+- `RedisStoreConfig`: Redis store settings (`Namespace`, `Retention`, `MaxSeries`, `IndexShards`).
 - `RedisStore`: Redis-backed shared store.
 
 ### Functions
@@ -35,6 +37,9 @@ The `store` package manages shared metric state and distributed locks.
 - `AcquireJobLock(jobID string, ttl time.Duration, now time.Time) bool`: acquires idempotency lock.
 - `AcquireDedupLock(key string, ttl time.Duration, now time.Time) bool`: acquires dedup lock.
 - `Acquire(key string, ttl time.Duration, now time.Time) bool`: deduper adapter alias.
+- `SetCheckpoint(org, repo string, checkpoint time.Time) error`: persists last successful scrape timestamp for one repo.
+- `GetCheckpoint(org, repo string) (time.Time, bool, error)`: returns last checkpoint for one repo.
+- `Healthy(ctx context.Context) bool`: reports backend health for readiness probes.
 - `GC(now time.Time)`: removes expired metrics and expired lock entries.
 - `Snapshot() []MetricPoint`: returns sorted metric snapshot.
 
@@ -45,6 +50,9 @@ The `store` package manages shared metric state and distributed locks.
 - `AcquireJobLock(jobID string, ttl time.Duration, now time.Time) bool`: acquires Redis lock key with TTL.
 - `AcquireDedupLock(key string, ttl time.Duration, now time.Time) bool`: acquires dedup lock key with TTL.
 - `Acquire(key string, ttl time.Duration, now time.Time) bool`: deduper adapter alias.
+- `SetCheckpoint(org, repo string, checkpoint time.Time) error`: writes checkpoint with retention TTL.
+- `GetCheckpoint(org, repo string) (time.Time, bool, error)`: reads checkpoint for one repo.
+- `Healthy(ctx context.Context) bool`: checks Redis command health for active dependency probes.
 - `GC(now time.Time)`: cleans stale index members whose metric keys have expired.
 - `Snapshot() []MetricPoint`: reads indexed series from Redis and returns sorted snapshot.
 - `SnapshotCursor() (uint64, error)`: returns current incremental cursor sequence.

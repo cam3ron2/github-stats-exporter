@@ -19,6 +19,8 @@ type queueBroker interface {
 	Publish(ctx context.Context, queue string, msg queuepkg.Message) error
 	Consume(ctx context.Context, queue string, cfg queuepkg.ConsumerConfig, handler queuepkg.Handler)
 	Depth(queue string) int
+	OldestAge(queue string, now time.Time) time.Duration
+	Health(ctx context.Context, queue string) error
 }
 
 type brokerBackfillQueue struct {
@@ -26,6 +28,7 @@ type brokerBackfillQueue struct {
 	queueName   string
 	dlqName     string
 	retryPolicy queuepkg.RetryPolicy
+	retryQueues []string
 }
 
 func newRuntimeBackends(cfg *config.Config, logger *zap.Logger, retention time.Duration, maxSeries int) (runtimeStore, runtimeQueue) {
@@ -42,6 +45,7 @@ func newRuntimeBackends(cfg *config.Config, logger *zap.Logger, retention time.D
 	queueName := "gh.backfill.jobs"
 	dlqName := ""
 	retryPolicy := queuepkg.RetryPolicy{MaxAttempts: 7}
+	retryQueues := []string{}
 
 	if cfg != nil {
 		if strings.TrimSpace(cfg.AMQP.Queue) != "" {
@@ -52,6 +56,7 @@ func newRuntimeBackends(cfg *config.Config, logger *zap.Logger, retention time.D
 			MaxAttempts: cfg.Retry.MaxAttempts,
 			Delays:      cfg.Backfill.RequeueDelays,
 		}
+		retryQueues = buildRetryQueueNames(queueName, retryPolicy.Delays)
 		if retryPolicy.MaxAttempts <= 0 {
 			retryPolicy.MaxAttempts = 7
 		}
@@ -68,6 +73,14 @@ func newRuntimeBackends(cfg *config.Config, logger *zap.Logger, retention time.D
 			if brokerErr != nil {
 				logger.Warn("failed to initialize rabbitmq queue; falling back to in-memory queue", zap.Error(brokerErr))
 			} else {
+				topology := queuepkg.TopologyConfig{
+					MainQueue:       queueName,
+					DeadLetterQueue: dlqName,
+					RetryQueues:     buildRetryQueueSpecs(retryQueues, retryPolicy.Delays),
+				}
+				if topologyErr := rabbitBroker.EnsureTopology(context.Background(), topology); topologyErr != nil {
+					logger.Warn("failed to declare rabbitmq topology", zap.Error(topologyErr))
+				}
 				broker = rabbitBroker
 			}
 		}
@@ -78,6 +91,7 @@ func newRuntimeBackends(cfg *config.Config, logger *zap.Logger, retention time.D
 		queueName:   queueName,
 		dlqName:     dlqName,
 		retryPolicy: retryPolicy,
+		retryQueues: retryQueues,
 	}
 }
 
@@ -110,9 +124,10 @@ func newRedisStoreFromConfig(cfg *config.Config, retention time.Duration, maxSer
 	}
 
 	return store.NewRedisStore(redisClient, store.RedisStoreConfig{
-		Namespace: "ghm",
-		Retention: retention,
-		MaxSeries: maxSeries,
+		Namespace:   "ghm",
+		Retention:   retention,
+		MaxSeries:   maxSeries,
+		IndexShards: cfg.Store.IndexShards,
 	}), nil
 }
 
@@ -147,6 +162,7 @@ func (q *brokerBackfillQueue) Consume(
 	q.broker.Consume(ctx, q.queueName, queuepkg.ConsumerConfig{
 		MaxMessageAge:   maxMessageAge,
 		RetryPolicy:     q.retryPolicy,
+		RetryQueues:     q.retryQueues,
 		DeadLetterQueue: q.dlqName,
 		Now:             nowFn,
 	}, func(ctx context.Context, msg queuepkg.Message) error {
@@ -172,4 +188,55 @@ func (q *brokerBackfillQueue) Depth() int {
 		return 0
 	}
 	return q.broker.Depth(q.queueName)
+}
+
+func (q *brokerBackfillQueue) OldestMessageAge(now time.Time) time.Duration {
+	if q == nil || q.broker == nil {
+		return 0
+	}
+	return q.broker.OldestAge(q.queueName, now)
+}
+
+func (q *brokerBackfillQueue) Healthy(ctx context.Context) bool {
+	if q == nil || q.broker == nil {
+		return false
+	}
+	return q.broker.Health(ctx, q.queueName) == nil
+}
+
+func buildRetryQueueNames(baseQueue string, delays []time.Duration) []string {
+	if strings.TrimSpace(baseQueue) == "" || len(delays) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(delays))
+	for _, delay := range delays {
+		if delay <= 0 {
+			continue
+		}
+		names = append(names, fmt.Sprintf("%s.retry.%s", baseQueue, delayToken(delay)))
+	}
+	return names
+}
+
+func buildRetryQueueSpecs(names []string, delays []time.Duration) []queuepkg.RetryQueueSpec {
+	if len(names) == 0 || len(delays) == 0 {
+		return nil
+	}
+	retryQueues := make([]queuepkg.RetryQueueSpec, 0, len(names))
+	for i, name := range names {
+		if i >= len(delays) {
+			break
+		}
+		retryQueues = append(retryQueues, queuepkg.RetryQueueSpec{
+			Name:  name,
+			Delay: delays[i],
+		})
+	}
+	return retryQueues
+}
+
+func delayToken(delay time.Duration) string {
+	token := strings.ReplaceAll(delay.String(), " ", "")
+	token = strings.ReplaceAll(token, ".", "_")
+	return token
 }

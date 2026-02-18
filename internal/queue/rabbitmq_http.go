@@ -14,6 +14,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // RabbitMQHTTPConfig configures the RabbitMQ management API broker.
@@ -28,6 +33,19 @@ type RabbitMQHTTPConfig struct {
 	HTTPClient   *http.Client
 	Now          func() time.Time
 	Sleep        func(time.Duration)
+}
+
+// RetryQueueSpec configures one delayed retry queue.
+type RetryQueueSpec struct {
+	Name  string
+	Delay time.Duration
+}
+
+// TopologyConfig declares AMQP exchange/queue resources required by the worker.
+type TopologyConfig struct {
+	MainQueue       string
+	DeadLetterQueue string
+	RetryQueues     []RetryQueueSpec
 }
 
 // RabbitMQHTTPBroker uses RabbitMQ management endpoints for queue operations.
@@ -136,6 +154,56 @@ func NewRabbitMQHTTPBroker(cfg RabbitMQHTTPConfig) (*RabbitMQHTTPBroker, error) 
 	}, nil
 }
 
+// EnsureTopology declares the exchange, queues, and bindings required by backfill processing.
+func (b *RabbitMQHTTPBroker) EnsureTopology(ctx context.Context, cfg TopologyConfig) error {
+	if b == nil {
+		return fmt.Errorf("rabbitmq broker is nil")
+	}
+	mainQueue := strings.TrimSpace(cfg.MainQueue)
+	if mainQueue == "" {
+		return fmt.Errorf("main queue is required")
+	}
+
+	if err := b.declareExchange(ctx); err != nil {
+		return err
+	}
+	if err := b.declareQueue(ctx, mainQueue, nil); err != nil {
+		return err
+	}
+	if err := b.bindQueue(ctx, mainQueue, mainQueue); err != nil {
+		return err
+	}
+
+	if dlq := strings.TrimSpace(cfg.DeadLetterQueue); dlq != "" {
+		if err := b.declareQueue(ctx, dlq, nil); err != nil {
+			return err
+		}
+		if err := b.bindQueue(ctx, dlq, dlq); err != nil {
+			return err
+		}
+	}
+
+	for _, retryQueue := range cfg.RetryQueues {
+		name := strings.TrimSpace(retryQueue.Name)
+		if name == "" || retryQueue.Delay <= 0 {
+			continue
+		}
+		arguments := map[string]any{
+			"x-message-ttl":             int(retryQueue.Delay.Milliseconds()),
+			"x-dead-letter-exchange":    b.exchange,
+			"x-dead-letter-routing-key": mainQueue,
+		}
+		if err := b.declareQueue(ctx, name, arguments); err != nil {
+			return err
+		}
+		if err := b.bindQueue(ctx, name, name); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 // Publish writes one message to the named queue using the configured exchange.
 func (b *RabbitMQHTTPBroker) Publish(ctx context.Context, queueName string, msg Message) error {
 	if b == nil {
@@ -228,8 +296,13 @@ func (b *RabbitMQHTTPBroker) Consume(ctx context.Context, queueName string, cfg 
 		if retry {
 			retryMessage := cloneMessage(msg)
 			retryMessage.Attempt++
-			sleepFn(delay)
-			if publishErr := b.Publish(ctx, queueName, retryMessage); publishErr != nil {
+			retryQueue := queueName
+			if configuredQueue, ok := retryQueueForAttempt(cfg.RetryQueues, msg.Attempt); ok {
+				retryQueue = configuredQueue
+			} else {
+				sleepFn(delay)
+			}
+			if publishErr := b.Publish(ctx, retryQueue, retryMessage); publishErr != nil {
 				continue
 			}
 			continue
@@ -254,32 +327,53 @@ func (b *RabbitMQHTTPBroker) Depth(queueName string) int {
 		return 0
 	}
 
-	endpoint := fmt.Sprintf("%s/api/queues/%s/%s", b.baseURL, b.vhostEncoded, url.PathEscape(queueName))
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, endpoint, nil)
+	payload, err := b.queueInfo(context.Background(), queueName)
 	if err != nil {
 		return 0
 	}
-	if b.username != "" || b.password != "" {
-		req.SetBasicAuth(b.username, b.password)
+	raw, ok := payload["messages"]
+	if !ok {
+		return 0
+	}
+	value, ok := raw.(float64)
+	if !ok {
+		return 0
+	}
+	return int(value)
+}
+
+// OldestAge returns the age of the queue head message when available.
+func (b *RabbitMQHTTPBroker) OldestAge(queueName string, now time.Time) time.Duration {
+	if b == nil || strings.TrimSpace(queueName) == "" {
+		return 0
 	}
 
-	//nolint:gosec // Endpoint is validated during broker construction.
-	resp, err := b.httpClient.Do(req)
+	payload, err := b.queueInfo(context.Background(), queueName)
 	if err != nil {
 		return 0
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+	raw, ok := payload["head_message_timestamp"]
+	if !ok || raw == nil {
 		return 0
 	}
 
-	var queueData struct {
-		Messages int `json:"messages"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&queueData); err != nil {
+	headTimestamp := parseHeadMessageTimestamp(raw)
+	if headTimestamp.IsZero() || now.Before(headTimestamp) {
 		return 0
 	}
-	return queueData.Messages
+	return now.Sub(headTimestamp)
+}
+
+// Health reports broker connectivity by checking queue metadata.
+func (b *RabbitMQHTTPBroker) Health(ctx context.Context, queueName string) error {
+	if b == nil {
+		return fmt.Errorf("rabbitmq broker is nil")
+	}
+	if strings.TrimSpace(queueName) == "" {
+		return fmt.Errorf("queue name is required")
+	}
+	_, err := b.queueInfo(ctx, queueName)
+	return err
 }
 
 func (b *RabbitMQHTTPBroker) popMessage(ctx context.Context, queueName string) (Message, bool) {
@@ -336,11 +430,122 @@ func decodeRabbitMessage(payload rabbitGetMessage) Message {
 	return msg
 }
 
+func (b *RabbitMQHTTPBroker) queueInfo(ctx context.Context, queueName string) (map[string]any, error) {
+	endpoint := fmt.Sprintf("%s/api/queues/%s/%s", b.baseURL, b.vhostEncoded, url.PathEscape(queueName))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	if b.username != "" || b.password != "" {
+		req.SetBasicAuth(b.username, b.password)
+	}
+
+	//nolint:gosec // Endpoint is validated during broker construction.
+	resp, err := b.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return nil, fmt.Errorf("queue info status: %d", resp.StatusCode)
+	}
+
+	payload := make(map[string]any)
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, err
+	}
+	return payload, nil
+}
+
+func parseHeadMessageTimestamp(raw any) time.Time {
+	switch value := raw.(type) {
+	case string:
+		if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
+			return parsed.UTC()
+		}
+		if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+			return parsed.UTC()
+		}
+	case float64:
+		seconds := int64(value)
+		if seconds > 0 {
+			return time.Unix(seconds, 0).UTC()
+		}
+	}
+	return time.Time{}
+}
+
+func (b *RabbitMQHTTPBroker) declareExchange(ctx context.Context) error {
+	endpoint := fmt.Sprintf("%s/api/exchanges/%s/%s", b.baseURL, b.vhostEncoded, url.PathEscape(b.exchange))
+	body := map[string]any{
+		"type":        "direct",
+		"durable":     true,
+		"auto_delete": false,
+		"internal":    false,
+		"arguments":   map[string]any{},
+	}
+	if err := b.doJSON(ctx, http.MethodPut, endpoint, body, nil); err != nil {
+		return fmt.Errorf("declare exchange %q: %w", b.exchange, err)
+	}
+	return nil
+}
+
+func (b *RabbitMQHTTPBroker) declareQueue(ctx context.Context, queueName string, arguments map[string]any) error {
+	endpoint := fmt.Sprintf("%s/api/queues/%s/%s", b.baseURL, b.vhostEncoded, url.PathEscape(queueName))
+	body := map[string]any{
+		"durable":     true,
+		"auto_delete": false,
+		"arguments":   arguments,
+	}
+	if err := b.doJSON(ctx, http.MethodPut, endpoint, body, nil); err != nil {
+		return fmt.Errorf("declare queue %q: %w", queueName, err)
+	}
+	return nil
+}
+
+func (b *RabbitMQHTTPBroker) bindQueue(ctx context.Context, queueName, routingKey string) error {
+	endpoint := fmt.Sprintf(
+		"%s/api/bindings/%s/e/%s/q/%s",
+		b.baseURL,
+		b.vhostEncoded,
+		url.PathEscape(b.exchange),
+		url.PathEscape(queueName),
+	)
+	body := map[string]any{
+		"routing_key": routingKey,
+		"arguments":   map[string]any{},
+	}
+	if err := b.doJSON(ctx, http.MethodPost, endpoint, body, nil); err != nil {
+		return fmt.Errorf("bind queue %q: %w", queueName, err)
+	}
+	return nil
+}
+
 func (b *RabbitMQHTTPBroker) doJSON(ctx context.Context, method, endpoint string, body any, decodeTarget any) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	endpointPath := endpoint
+	if parsed, err := url.Parse(endpoint); err == nil && parsed.Path != "" {
+		endpointPath = parsed.Path
+	}
+	ctx, span := otel.Tracer("github-stats/internal/queue").Start(
+		ctx,
+		"rabbitmq.http.request",
+		trace.WithAttributes(
+			attribute.String("messaging.system", "rabbitmq"),
+			attribute.String("http.method", method),
+			attribute.String("http.path", endpointPath),
+		),
+	)
+	defer span.End()
+
 	var reader io.Reader
 	if body != nil {
 		payload, err := json.Marshal(body)
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return fmt.Errorf("marshal rabbitmq request body: %w", err)
 		}
 		reader = bytes.NewReader(payload)
@@ -348,6 +553,8 @@ func (b *RabbitMQHTTPBroker) doJSON(ctx context.Context, method, endpoint string
 
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("create rabbitmq request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -358,24 +565,36 @@ func (b *RabbitMQHTTPBroker) doJSON(ctx context.Context, method, endpoint string
 	//nolint:gosec // Endpoint is validated during broker construction.
 	resp, err := b.httpClient.Do(req)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("execute rabbitmq request: %w", err)
 	}
 	defer resp.Body.Close()
+	span.SetAttributes(attribute.Int("http.status_code", resp.StatusCode))
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		bodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		if readErr != nil {
+			span.RecordError(readErr)
+			span.SetStatus(codes.Error, readErr.Error())
 			return fmt.Errorf("rabbitmq request failed: status=%d body-read-error=%v", resp.StatusCode, readErr)
 		}
-		return fmt.Errorf("rabbitmq request failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
+		err = fmt.Errorf("rabbitmq request failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
 	}
 
 	if decodeTarget == nil {
+		span.SetStatus(codes.Ok, "request completed")
 		return nil
 	}
 	if err := json.NewDecoder(resp.Body).Decode(decodeTarget); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("decode rabbitmq response: %w", err)
 	}
+	span.SetStatus(codes.Ok, "request completed")
 	return nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"strings"
 	"sync"
 	"time"
 )
@@ -46,6 +47,7 @@ func (p RetryPolicy) NextDelay(attempt int) (time.Duration, bool) {
 type ConsumerConfig struct {
 	MaxMessageAge   time.Duration
 	RetryPolicy     RetryPolicy
+	RetryQueues     []string
 	DeadLetterQueue string
 	Now             func() time.Time
 	Sleep           func(time.Duration)
@@ -59,6 +61,7 @@ type InMemoryBroker struct {
 	mu     sync.RWMutex
 	buffer int
 	queues map[string]chan Message
+	times  map[string][]time.Time
 }
 
 // NewInMemoryBroker creates an in-memory broker.
@@ -69,6 +72,7 @@ func NewInMemoryBroker(buffer int) *InMemoryBroker {
 	return &InMemoryBroker{
 		buffer: buffer,
 		queues: make(map[string]chan Message),
+		times:  make(map[string][]time.Time),
 	}
 }
 
@@ -83,6 +87,7 @@ func (b *InMemoryBroker) Publish(_ context.Context, queue string, msg Message) e
 
 	queueChan := b.ensureQueue(queue)
 	message := cloneMessage(msg)
+	b.enqueueTimestamp(queue, message.CreatedAt)
 	select {
 	case queueChan <- message:
 		return nil
@@ -115,6 +120,7 @@ func (b *InMemoryBroker) Consume(ctx context.Context, queue string, cfg Consumer
 		case <-ctx.Done():
 			return
 		case msg := <-queueChan:
+			b.dequeueTimestamp(queue)
 			if ShouldDropMessageByAge(msg, nowFn(), cfg.MaxMessageAge) {
 				continue
 			}
@@ -131,8 +137,13 @@ func (b *InMemoryBroker) Consume(ctx context.Context, queue string, cfg Consumer
 			if retry {
 				retryMessage := cloneMessage(msg)
 				retryMessage.Attempt++
-				sleepFn(delay)
-				if publishErr := b.Publish(ctx, queue, retryMessage); publishErr != nil {
+				retryQueue := queue
+				if configuredQueue, ok := retryQueueForAttempt(cfg.RetryQueues, msg.Attempt); ok {
+					retryQueue = configuredQueue
+				} else {
+					sleepFn(delay)
+				}
+				if publishErr := b.Publish(ctx, retryQueue, retryMessage); publishErr != nil {
 					continue
 				}
 				continue
@@ -152,6 +163,25 @@ func (b *InMemoryBroker) Consume(ctx context.Context, queue string, cfg Consumer
 	}
 }
 
+// OldestAge returns age of the oldest tracked message for the queue.
+func (b *InMemoryBroker) OldestAge(queue string, now time.Time) time.Duration {
+	if b == nil || queue == "" {
+		return 0
+	}
+
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	timestamps := b.times[queue]
+	if len(timestamps) == 0 {
+		return 0
+	}
+	oldest := timestamps[0]
+	if oldest.IsZero() || now.Before(oldest) {
+		return 0
+	}
+	return now.Sub(oldest)
+}
+
 // Depth returns the queued item count for one queue.
 func (b *InMemoryBroker) Depth(queue string) int {
 	if b == nil || queue == "" {
@@ -165,6 +195,18 @@ func (b *InMemoryBroker) Depth(queue string) int {
 		return 0
 	}
 	return len(queueChan)
+}
+
+// Health reports broker readiness for the requested queue.
+func (b *InMemoryBroker) Health(_ context.Context, queue string) error {
+	if b == nil {
+		return fmt.Errorf("queue broker is nil")
+	}
+	if strings.TrimSpace(queue) == "" {
+		return fmt.Errorf("queue name is required")
+	}
+	_ = b.ensureQueue(queue)
+	return nil
 }
 
 // ShouldDropMessageByAge returns true when message age exceeds max age.
@@ -201,4 +243,47 @@ func cloneMessage(msg Message) Message {
 		cloned.Body = append([]byte(nil), msg.Body...)
 	}
 	return cloned
+}
+
+func retryQueueForAttempt(queues []string, attempt int) (string, bool) {
+	if len(queues) == 0 {
+		return "", false
+	}
+	if attempt < 1 {
+		attempt = 1
+	}
+	index := attempt - 1
+	if index >= len(queues) {
+		index = len(queues) - 1
+	}
+	queue := strings.TrimSpace(queues[index])
+	if queue == "" {
+		return "", false
+	}
+	return queue, true
+}
+
+func (b *InMemoryBroker) enqueueTimestamp(queue string, createdAt time.Time) {
+	now := createdAt.UTC()
+	if createdAt.IsZero() {
+		now = time.Now().UTC()
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.times[queue] = append(b.times[queue], now)
+}
+
+func (b *InMemoryBroker) dequeueTimestamp(queue string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	timestamps := b.times[queue]
+	if len(timestamps) == 0 {
+		return
+	}
+	if len(timestamps) == 1 {
+		delete(b.times, queue)
+		return
+	}
+	b.times[queue] = append([]time.Time{}, timestamps[1:]...)
 }

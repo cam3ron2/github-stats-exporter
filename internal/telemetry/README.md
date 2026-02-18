@@ -8,13 +8,14 @@ The `telemetry` package configures OpenTelemetry tracing behavior.
 - Applies sampler strategy based on configured mode and sample ratio.
 - Stores active mode globally so dependency clients can omit detailed spans unless `detailed` is enabled.
 - Registers a global tracer provider.
+- Optionally wires an OTLP/HTTP trace exporter when `OTLPEndpoint` is configured.
 - Exposes shutdown hook for graceful provider flush/cleanup.
 
 ## API reference
 
 ### Types
 
-- `Config`: telemetry config input (`Enabled`, `ServiceName`, `TraceMode`, `TraceSampleRatio`).
+- `Config`: telemetry config input (`Enabled`, `ServiceName`, `OTLPEndpoint`, `TraceMode`, `TraceSampleRatio`).
 - `Runtime`: initialized telemetry runtime (`TracerProvider`, `Shutdown`).
 
 ### Functions

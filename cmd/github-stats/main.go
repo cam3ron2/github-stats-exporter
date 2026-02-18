@@ -65,6 +65,7 @@ func run() error {
 	telemetryRuntime, err := telemetry.Setup(telemetry.Config{
 		Enabled:          cfg.Telemetry.OTELEnabled,
 		ServiceName:      "github-stats",
+		OTLPEndpoint:     cfg.Telemetry.OTELExporterEndpoint,
 		TraceMode:        cfg.Telemetry.OTELTraceMode,
 		TraceSampleRatio: cfg.Telemetry.OTELTraceSampleRatio,
 	})

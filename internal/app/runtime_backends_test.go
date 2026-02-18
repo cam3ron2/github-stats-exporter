@@ -212,3 +212,30 @@ func TestNewRedisStoreFromConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildRetryQueueNamesAndSpecs(t *testing.T) {
+	t.Parallel()
+
+	delays := []time.Duration{time.Minute, 5 * time.Minute}
+	names := buildRetryQueueNames("gh.backfill.jobs", delays)
+	if len(names) != 2 {
+		t.Fatalf("buildRetryQueueNames() len = %d, want 2", len(names))
+	}
+	if names[0] != "gh.backfill.jobs.retry.1m0s" {
+		t.Fatalf("first retry queue = %q, want gh.backfill.jobs.retry.1m0s", names[0])
+	}
+	if names[1] != "gh.backfill.jobs.retry.5m0s" {
+		t.Fatalf("second retry queue = %q, want gh.backfill.jobs.retry.5m0s", names[1])
+	}
+
+	specs := buildRetryQueueSpecs(names, delays)
+	if len(specs) != 2 {
+		t.Fatalf("buildRetryQueueSpecs() len = %d, want 2", len(specs))
+	}
+	if specs[0].Name != names[0] || specs[0].Delay != time.Minute {
+		t.Fatalf("first retry queue spec = %#v, want name=%q delay=1m", specs[0], names[0])
+	}
+	if specs[1].Name != names[1] || specs[1].Delay != 5*time.Minute {
+		t.Fatalf("second retry queue spec = %#v, want name=%q delay=5m", specs[1], names[1])
+	}
+}

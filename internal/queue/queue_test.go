@@ -65,6 +65,61 @@ func TestRetryPolicyNextDelay(t *testing.T) {
 	}
 }
 
+func TestRetryQueueForAttempt(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name      string
+		queues    []string
+		attempt   int
+		wantQueue string
+		wantOK    bool
+	}{
+		{
+			name:      "first_attempt_uses_first_queue",
+			queues:    []string{"jobs.retry.1m", "jobs.retry.5m"},
+			attempt:   1,
+			wantQueue: "jobs.retry.1m",
+			wantOK:    true,
+		},
+		{
+			name:      "later_attempt_clamps_to_last_queue",
+			queues:    []string{"jobs.retry.1m", "jobs.retry.5m"},
+			attempt:   4,
+			wantQueue: "jobs.retry.5m",
+			wantOK:    true,
+		},
+		{
+			name:      "empty_queue_name_is_invalid",
+			queues:    []string{""},
+			attempt:   1,
+			wantQueue: "",
+			wantOK:    false,
+		},
+		{
+			name:      "no_retry_queues",
+			queues:    nil,
+			attempt:   1,
+			wantQueue: "",
+			wantOK:    false,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			queue, ok := retryQueueForAttempt(tc.queues, tc.attempt)
+			if ok != tc.wantOK {
+				t.Fatalf("retryQueueForAttempt().ok = %t, want %t", ok, tc.wantOK)
+			}
+			if queue != tc.wantQueue {
+				t.Fatalf("retryQueueForAttempt().queue = %q, want %q", queue, tc.wantQueue)
+			}
+		})
+	}
+}
+
 func TestInMemoryBrokerPublishAndConsume(t *testing.T) {
 	t.Parallel()
 
@@ -214,6 +269,49 @@ func TestInMemoryBrokerMovesToDeadLetterWhenExhausted(t *testing.T) {
 	}
 }
 
+func TestInMemoryBrokerRoutesRetriesToConfiguredRetryQueue(t *testing.T) {
+	t.Parallel()
+
+	broker := NewInMemoryBroker(8)
+	now := time.Unix(1739836800, 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := broker.Publish(ctx, "jobs", Message{ID: "m1", CreatedAt: now, Attempt: 1}); err != nil {
+		t.Fatalf("Publish() unexpected error: %v", err)
+	}
+
+	var sleepCalls atomic.Int32
+	go broker.Consume(ctx, "jobs", ConsumerConfig{
+		RetryPolicy: RetryPolicy{MaxAttempts: 3, Delays: []time.Duration{time.Minute}},
+		RetryQueues: []string{"jobs.retry.1m"},
+		Sleep: func(time.Duration) {
+			sleepCalls.Add(1)
+		},
+	}, func(_ context.Context, _ Message) error {
+		return errors.New("fail and retry")
+	})
+
+	retried := make(chan Message, 1)
+	go broker.Consume(ctx, "jobs.retry.1m", ConsumerConfig{}, func(_ context.Context, msg Message) error {
+		retried <- msg
+		cancel()
+		return nil
+	})
+
+	select {
+	case msg := <-retried:
+		if msg.Attempt != 2 {
+			t.Fatalf("retried attempt = %d, want 2", msg.Attempt)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for retried message")
+	}
+	if sleepCalls.Load() != 0 {
+		t.Fatalf("sleep calls = %d, want 0 when retry queue is configured", sleepCalls.Load())
+	}
+}
+
 func TestInMemoryBrokerPublishFailsWhenBufferFull(t *testing.T) {
 	t.Parallel()
 
@@ -226,5 +324,17 @@ func TestInMemoryBrokerPublishFailsWhenBufferFull(t *testing.T) {
 	}
 	if err := broker.Publish(ctx, "jobs", Message{ID: "m2", CreatedAt: now}); err == nil {
 		t.Fatalf("Publish(second) expected buffer full error, got nil")
+	}
+}
+
+func TestInMemoryBrokerHealth(t *testing.T) {
+	t.Parallel()
+
+	broker := NewInMemoryBroker(1)
+	if err := broker.Health(context.Background(), "jobs"); err != nil {
+		t.Fatalf("Health() unexpected error: %v", err)
+	}
+	if err := broker.Health(context.Background(), ""); err == nil {
+		t.Fatalf("Health(empty queue) expected error, got nil")
 	}
 }

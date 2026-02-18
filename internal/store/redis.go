@@ -9,9 +9,14 @@ import (
 	"maps"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type redisCommander interface {
@@ -33,18 +38,20 @@ type redisCommander interface {
 
 // RedisStoreConfig configures the Redis-backed shared metric store.
 type RedisStoreConfig struct {
-	Namespace string
-	Retention time.Duration
-	MaxSeries int
+	Namespace   string
+	Retention   time.Duration
+	MaxSeries   int
+	IndexShards int
 }
 
 // RedisStore stores shared metrics and lock state in Redis.
 type RedisStore struct {
-	client    redisCommander
-	closeFn   func() error
-	namespace string
-	retention time.Duration
-	maxSeries int
+	client      redisCommander
+	closeFn     func() error
+	namespace   string
+	retention   time.Duration
+	maxSeries   int
+	indexShards int
 }
 
 // NewRedisStore creates a Redis-backed metric store.
@@ -66,11 +73,12 @@ func newRedisStoreFromCommander(client redisCommander, closeFn func() error, cfg
 	}
 
 	return &RedisStore{
-		client:    client,
-		closeFn:   closeFn,
-		namespace: namespace,
-		retention: cfg.Retention,
-		maxSeries: cfg.MaxSeries,
+		client:      client,
+		closeFn:     closeFn,
+		namespace:   namespace,
+		retention:   cfg.Retention,
+		maxSeries:   cfg.MaxSeries,
+		indexShards: max(1, cfg.IndexShards),
 	}
 }
 
@@ -82,40 +90,59 @@ func (s *RedisStore) Close() error {
 	return s.closeFn()
 }
 
+// Healthy reports Redis connectivity for dependency health probing.
+func (s *RedisStore) Healthy(ctx context.Context) bool {
+	if s == nil || s.client == nil {
+		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	_, err := s.client.SCard(ctx, s.metricsIndexKey()).Result()
+	return err == nil
+}
+
 // UpsertMetric inserts or updates a metric point with role/source write guards.
 func (s *RedisStore) UpsertMetric(role RuntimeRole, source WriteSource, point MetricPoint) error {
+	_, span := startRedisSpan(
+		"upsert_metric",
+		attribute.String("metric.name", point.Name),
+		attribute.String("store.write_source", string(source)),
+	)
+	defer span.End()
+
 	if s == nil || s.client == nil {
-		return fmt.Errorf("redis store is not initialized")
+		return spanError(span, fmt.Errorf("redis store is not initialized"))
 	}
 	if err := validateWriteSource(role, source); err != nil {
-		return err
+		return spanError(span, err)
 	}
 	if point.Name == "" {
-		return fmt.Errorf("metric name is required")
+		return spanError(span, fmt.Errorf("metric name is required"))
 	}
 	if point.UpdatedAt.IsZero() {
-		return fmt.Errorf("metric updated time is required")
+		return spanError(span, fmt.Errorf("metric updated time is required"))
 	}
 
 	ctx := context.Background()
 	seriesID := hashSeriesID(metricKey(point.Name, point.Labels))
-	isMember, err := s.client.SIsMember(ctx, s.metricsIndexKey(), seriesID).Result()
+	isMember, err := s.seriesIndexed(ctx, seriesID)
 	if err != nil {
-		return fmt.Errorf("check metric membership: %w", err)
+		return spanError(span, fmt.Errorf("check metric membership: %w", err))
 	}
 	if !isMember && s.maxSeries > 0 {
-		seriesCount, countErr := s.client.SCard(ctx, s.metricsIndexKey()).Result()
+		seriesCount, countErr := s.seriesCount(ctx)
 		if countErr != nil {
-			return fmt.Errorf("count metric series: %w", countErr)
+			return spanError(span, fmt.Errorf("count metric series: %w", countErr))
 		}
-		if seriesCount >= int64(s.maxSeries) {
-			return fmt.Errorf("max series budget exceeded")
+		if seriesCount >= s.maxSeries {
+			return spanError(span, fmt.Errorf("max series budget exceeded"))
 		}
 	}
 
 	labelsJSON, err := json.Marshal(point.Labels)
 	if err != nil {
-		return fmt.Errorf("marshal metric labels: %w", err)
+		return spanError(span, fmt.Errorf("marshal metric labels: %w", err))
 	}
 
 	fields := map[string]any{
@@ -127,22 +154,23 @@ func (s *RedisStore) UpsertMetric(role RuntimeRole, source WriteSource, point Me
 
 	metricKey := s.metricDataKey(seriesID)
 	if err := s.client.HSet(ctx, metricKey, fields).Err(); err != nil {
-		return fmt.Errorf("write metric hash: %w", err)
+		return spanError(span, fmt.Errorf("write metric hash: %w", err))
 	}
-	if err := s.client.SAdd(ctx, s.metricsIndexKey(), seriesID).Err(); err != nil {
-		return fmt.Errorf("index metric series: %w", err)
+	if err := s.client.SAdd(ctx, s.metricIndexKeyForSeries(seriesID), seriesID).Err(); err != nil {
+		return spanError(span, fmt.Errorf("index metric series: %w", err))
 	}
 
 	if s.retention > 0 {
 		expiresAt := point.UpdatedAt.Add(s.retention)
 		if err := s.client.ExpireAt(ctx, metricKey, expiresAt).Err(); err != nil {
-			return fmt.Errorf("set metric ttl: %w", err)
+			return spanError(span, fmt.Errorf("set metric ttl: %w", err))
 		}
 	}
 	if _, err := s.recordSeriesChange(ctx, seriesID); err != nil {
-		return fmt.Errorf("record metric change: %w", err)
+		return spanError(span, fmt.Errorf("record metric change: %w", err))
 	}
 
+	span.SetStatus(codes.Ok, "metric upserted")
 	return nil
 }
 
@@ -161,6 +189,81 @@ func (s *RedisStore) Acquire(key string, ttl time.Duration, now time.Time) bool 
 	return s.AcquireDedupLock(key, ttl, now)
 }
 
+// SetCheckpoint stores the latest processed timestamp for one org/repo.
+func (s *RedisStore) SetCheckpoint(org, repo string, checkpoint time.Time) error {
+	_, span := startRedisSpan(
+		"set_checkpoint",
+		attribute.String("github.org", strings.TrimSpace(org)),
+		attribute.String("github.repo", strings.TrimSpace(repo)),
+	)
+	defer span.End()
+
+	if s == nil || s.client == nil {
+		return spanError(span, fmt.Errorf("redis store is not initialized"))
+	}
+	if strings.TrimSpace(org) == "" {
+		return spanError(span, fmt.Errorf("org is required"))
+	}
+	if strings.TrimSpace(repo) == "" {
+		return spanError(span, fmt.Errorf("repo is required"))
+	}
+	if checkpoint.IsZero() {
+		return spanError(span, fmt.Errorf("checkpoint time is required"))
+	}
+
+	ctx := context.Background()
+	key := s.checkpointDataKey(org, repo)
+	fields := map[string]any{
+		"checkpoint_unix_nano": strconv.FormatInt(checkpoint.UTC().UnixNano(), 10),
+	}
+	if err := s.client.HSet(ctx, key, fields).Err(); err != nil {
+		return spanError(span, fmt.Errorf("write checkpoint: %w", err))
+	}
+	if s.retention > 0 {
+		if err := s.client.ExpireAt(ctx, key, checkpoint.Add(s.retention)).Err(); err != nil {
+			return spanError(span, fmt.Errorf("set checkpoint ttl: %w", err))
+		}
+	}
+	span.SetStatus(codes.Ok, "checkpoint written")
+	return nil
+}
+
+// GetCheckpoint returns the latest processed timestamp for one org/repo.
+func (s *RedisStore) GetCheckpoint(org, repo string) (time.Time, bool, error) {
+	_, span := startRedisSpan(
+		"get_checkpoint",
+		attribute.String("github.org", strings.TrimSpace(org)),
+		attribute.String("github.repo", strings.TrimSpace(repo)),
+	)
+	defer span.End()
+
+	if s == nil || s.client == nil {
+		return time.Time{}, false, spanError(span, fmt.Errorf("redis store is not initialized"))
+	}
+	if strings.TrimSpace(org) == "" {
+		return time.Time{}, false, spanError(span, fmt.Errorf("org is required"))
+	}
+	if strings.TrimSpace(repo) == "" {
+		return time.Time{}, false, spanError(span, fmt.Errorf("repo is required"))
+	}
+
+	fields, err := s.client.HGetAll(context.Background(), s.checkpointDataKey(org, repo)).Result()
+	if err != nil {
+		return time.Time{}, false, spanError(span, fmt.Errorf("read checkpoint: %w", err))
+	}
+	rawCheckpoint := strings.TrimSpace(fields["checkpoint_unix_nano"])
+	if rawCheckpoint == "" {
+		span.SetStatus(codes.Ok, "checkpoint not found")
+		return time.Time{}, false, nil
+	}
+	nanos, err := strconv.ParseInt(rawCheckpoint, 10, 64)
+	if err != nil {
+		return time.Time{}, false, spanError(span, fmt.Errorf("parse checkpoint timestamp: %w", err))
+	}
+	span.SetStatus(codes.Ok, "checkpoint loaded")
+	return time.Unix(0, nanos).UTC(), true, nil
+}
+
 // GC removes stale metric index references where series keys have already expired.
 func (s *RedisStore) GC(_ time.Time) {
 	if s == nil || s.client == nil {
@@ -168,7 +271,7 @@ func (s *RedisStore) GC(_ time.Time) {
 	}
 
 	ctx := context.Background()
-	seriesIDs, err := s.client.SMembers(ctx, s.metricsIndexKey()).Result()
+	seriesIDs, err := s.loadSeriesIDs(ctx)
 	if err != nil {
 		return
 	}
@@ -179,7 +282,7 @@ func (s *RedisStore) GC(_ time.Time) {
 			continue
 		}
 		if exists == 0 {
-			removedCount, remErr := s.client.SRem(ctx, s.metricsIndexKey(), seriesID).Result()
+			removedCount, remErr := s.removeSeriesIDFromIndexes(ctx, seriesID)
 			if remErr != nil {
 				continue
 			}
@@ -200,7 +303,7 @@ func (s *RedisStore) Snapshot() []MetricPoint {
 	}
 
 	ctx := context.Background()
-	seriesIDs, err := s.client.SMembers(ctx, s.metricsIndexKey()).Result()
+	seriesIDs, err := s.loadSeriesIDs(ctx)
 	if err != nil {
 		return nil
 	}
@@ -374,6 +477,82 @@ func (s *RedisStore) metricsIndexKey() string {
 	return s.prefixed("metrics:index")
 }
 
+func (s *RedisStore) metricsShardIndexKey(shard int) string {
+	return s.prefixed(fmt.Sprintf("metrics:index:%03d", shard))
+}
+
+func (s *RedisStore) metricIndexKeyForSeries(seriesID string) string {
+	if s.indexShards <= 1 {
+		return s.metricsIndexKey()
+	}
+	return s.metricsShardIndexKey(indexShardForSeries(seriesID, s.indexShards))
+}
+
+func (s *RedisStore) seriesIndexReadKeys() []string {
+	if s.indexShards <= 1 {
+		return []string{s.metricsIndexKey()}
+	}
+	keys := make([]string, 0, s.indexShards+1)
+	for shard := range s.indexShards {
+		keys = append(keys, s.metricsShardIndexKey(shard))
+	}
+	keys = append(keys, s.metricsIndexKey())
+	return keys
+}
+
+func (s *RedisStore) loadSeriesIDs(ctx context.Context) ([]string, error) {
+	keys := s.seriesIndexReadKeys()
+	seen := make(map[string]struct{})
+	seriesIDs := make([]string, 0)
+	for _, key := range keys {
+		members, err := s.client.SMembers(ctx, key).Result()
+		if err != nil {
+			return nil, err
+		}
+		for _, member := range members {
+			if _, exists := seen[member]; exists {
+				continue
+			}
+			seen[member] = struct{}{}
+			seriesIDs = append(seriesIDs, member)
+		}
+	}
+	return seriesIDs, nil
+}
+
+func (s *RedisStore) seriesIndexed(ctx context.Context, seriesID string) (bool, error) {
+	for _, key := range s.seriesIndexReadKeys() {
+		isMember, err := s.client.SIsMember(ctx, key, seriesID).Result()
+		if err != nil {
+			return false, err
+		}
+		if isMember {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *RedisStore) seriesCount(ctx context.Context) (int, error) {
+	seriesIDs, err := s.loadSeriesIDs(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return len(seriesIDs), nil
+}
+
+func (s *RedisStore) removeSeriesIDFromIndexes(ctx context.Context, seriesID string) (int64, error) {
+	removedTotal := int64(0)
+	for _, key := range s.seriesIndexReadKeys() {
+		removed, err := s.client.SRem(ctx, key, seriesID).Result()
+		if err != nil {
+			return removedTotal, err
+		}
+		removedTotal += removed
+	}
+	return removedTotal, nil
+}
+
 func (s *RedisStore) metricsSequenceKey() string {
 	return s.prefixed("metrics:seq")
 }
@@ -386,7 +565,36 @@ func (s *RedisStore) metricDataKey(seriesID string) string {
 	return s.prefixed("metric:" + seriesID)
 }
 
+func (s *RedisStore) checkpointDataKey(org, repo string) string {
+	return s.prefixed("checkpoint:" + checkpointKey(org, repo))
+}
+
+func startRedisSpan(operation string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+	return otel.Tracer("github-stats/internal/store").Start(
+		context.Background(),
+		"redis."+operation,
+		trace.WithAttributes(attrs...),
+	)
+}
+
+func spanError(span trace.Span, err error) error {
+	if err == nil {
+		return nil
+	}
+	span.RecordError(err)
+	span.SetStatus(codes.Error, err.Error())
+	return err
+}
+
 func hashSeriesID(raw string) string {
 	sum := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(sum[:])
+}
+
+func indexShardForSeries(seriesID string, shardCount int) int {
+	if shardCount <= 1 {
+		return 0
+	}
+	sum := sha256.Sum256([]byte(seriesID))
+	return int(sum[0]) % shardCount
 }
