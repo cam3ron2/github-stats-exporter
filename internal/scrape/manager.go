@@ -3,6 +3,7 @@ package scrape
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/cam3ron2/github-stats/internal/config"
 	"github.com/cam3ron2/github-stats/internal/store"
@@ -10,7 +11,36 @@ import (
 
 // OrgResult is the scrape output for one organization.
 type OrgResult struct {
-	Metrics []store.MetricPoint
+	Metrics      []store.MetricPoint
+	MissedWindow []MissedWindow
+	Summary      OrgSummary
+}
+
+// MissedWindow describes a failed scrape window that can be backfilled later.
+type MissedWindow struct {
+	Org         string
+	Repo        string
+	WindowStart time.Time
+	WindowEnd   time.Time
+	Reason      string
+}
+
+// OrgSummary provides per-organization scrape debug counters.
+type OrgSummary struct {
+	ReposDiscovered         int
+	ReposTargeted           int
+	ReposProcessed          int
+	ReposStatsAccepted      int
+	ReposStatsForbidden     int
+	ReposStatsNotFound      int
+	ReposStatsConflict      int
+	ReposStatsUnprocessable int
+	ReposStatsUnavailable   int
+	ReposNoCompleteWeek     int
+	ReposFallbackUsed       int
+	ReposFallbackTruncated  int
+	MissedWindows           int
+	MetricsProduced         int
 }
 
 // Outcome contains scrape results and errors for one organization.

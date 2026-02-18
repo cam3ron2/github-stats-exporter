@@ -6,6 +6,7 @@ The `app` package wires runtime role behavior (leader vs follower), scrape/backf
 
 - Leader mode runs scheduled scrape cycles and writes metrics to the store.
 - Each leader cycle also writes `gh_exporter_leader_cycle_last_run_unixtime` so `/metrics` is non-empty even when no activity metrics are produced.
+- Leader cycles enqueue targeted backfill for both whole-org failures and per-repo missed windows returned by scraper partial results.
 - Follower mode consumes backfill jobs from the queue and writes backfill result metrics.
 - Health status is evaluated from role-aware dependency flags.
 - HTTP routing exposes `/metrics`, `/livez`, `/readyz`, and `/healthz`.

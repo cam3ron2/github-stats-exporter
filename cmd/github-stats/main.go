@@ -13,6 +13,7 @@ import (
 
 	"github.com/cam3ron2/github-stats/internal/app"
 	"github.com/cam3ron2/github-stats/internal/config"
+	"github.com/cam3ron2/github-stats/internal/scrape"
 	"github.com/cam3ron2/github-stats/internal/telemetry"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -68,7 +69,12 @@ func run() error {
 		_ = telemetryRuntime.Shutdown(shutdownCtx)
 	}()
 
-	runtime := app.NewRuntime(cfg, nil, logger)
+	orgScraper, err := scrape.NewOrgScraperFromConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("build org scraper: %w", err)
+	}
+
+	runtime := app.NewRuntime(cfg, orgScraper, logger)
 	handler := runtime.Handler()
 	server := &http.Server{
 		Addr:              cfg.Server.ListenAddr,

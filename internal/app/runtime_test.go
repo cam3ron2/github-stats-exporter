@@ -177,6 +177,53 @@ func TestRuntimeLeaderFailureEnqueuesBackfill(t *testing.T) {
 	}
 }
 
+func TestRuntimeLeaderPartialFailureEnqueuesBackfillAndKeepsMetrics(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	now := time.Unix(1739836800, 0)
+	runtime := NewRuntime(cfg, &fakeOrgScraper{
+		result: scrape.OrgResult{
+			Metrics: []store.MetricPoint{
+				{
+					Name: "gh_activity_commits_24h",
+					Labels: map[string]string{
+						"org":  "org-a",
+						"repo": "repo-a",
+						"user": "alice",
+					},
+					Value:     4,
+					UpdatedAt: now,
+				},
+			},
+			MissedWindow: []scrape.MissedWindow{
+				{
+					Org:         "org-a",
+					Repo:        "repo-b",
+					WindowStart: now.Add(-time.Hour),
+					WindowEnd:   now,
+					Reason:      "repo_scrape_failed",
+				},
+			},
+		},
+	})
+	runtime.Now = func() time.Time { return now }
+
+	err := runtime.RunLeaderCycle(context.Background())
+	if err != nil {
+		t.Fatalf("RunLeaderCycle() unexpected error: %v", err)
+	}
+	if runtime.QueueDepth() != 1 {
+		t.Fatalf("QueueDepth() = %d, want 1", runtime.QueueDepth())
+	}
+
+	snapshot := runtime.Store().Snapshot()
+	activityMetric := findMetric(snapshot, "gh_activity_commits_24h")
+	if activityMetric == nil {
+		t.Fatalf("missing gh_activity_commits_24h")
+	}
+}
+
 func TestRuntimeCurrentStatusRoleAware(t *testing.T) {
 	t.Parallel()
 

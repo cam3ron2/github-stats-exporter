@@ -252,6 +252,65 @@ func (r *Runtime) RunLeaderCycle(ctx context.Context) error {
 			continue
 		}
 		r.logger.Debug("organization scrape succeeded", zap.String("org", outcome.Org), zap.Int("metric_points", len(outcome.Result.Metrics)))
+		r.logger.Debug(
+			"organization scrape summary",
+			zap.String("org", outcome.Org),
+			zap.Int("repos_discovered", outcome.Result.Summary.ReposDiscovered),
+			zap.Int("repos_targeted", outcome.Result.Summary.ReposTargeted),
+			zap.Int("repos_processed", outcome.Result.Summary.ReposProcessed),
+			zap.Int("repos_stats_202", outcome.Result.Summary.ReposStatsAccepted),
+			zap.Int("repos_stats_forbidden", outcome.Result.Summary.ReposStatsForbidden),
+			zap.Int("repos_stats_not_found", outcome.Result.Summary.ReposStatsNotFound),
+			zap.Int("repos_stats_conflict", outcome.Result.Summary.ReposStatsConflict),
+			zap.Int("repos_stats_unprocessable", outcome.Result.Summary.ReposStatsUnprocessable),
+			zap.Int("repos_stats_unavailable", outcome.Result.Summary.ReposStatsUnavailable),
+			zap.Int("repos_no_complete_week", outcome.Result.Summary.ReposNoCompleteWeek),
+			zap.Int("repos_fallback_used", outcome.Result.Summary.ReposFallbackUsed),
+			zap.Int("repos_fallback_truncated", outcome.Result.Summary.ReposFallbackTruncated),
+			zap.Int("missed_windows", outcome.Result.Summary.MissedWindows),
+			zap.Int("metrics_produced", outcome.Result.Summary.MetricsProduced),
+		)
+
+		for _, missed := range outcome.Result.MissedWindow {
+			messageOrg := missed.Org
+			if messageOrg == "" {
+				messageOrg = outcome.Org
+			}
+			messageRepo := missed.Repo
+			if messageRepo == "" {
+				messageRepo = "*"
+			}
+			windowStart := missed.WindowStart
+			if windowStart.IsZero() {
+				windowStart = now
+			}
+			windowEnd := missed.WindowEnd
+			if windowEnd.IsZero() {
+				windowEnd = now
+			}
+			reason := missed.Reason
+			if reason == "" {
+				reason = "partial_scrape_error"
+			}
+
+			enqueueResult := r.dispatcher.EnqueueMissing(backfill.MessageInput{
+				Org:         messageOrg,
+				Repo:        messageRepo,
+				WindowStart: windowStart,
+				WindowEnd:   windowEnd,
+				Reason:      reason,
+				Now:         now,
+			})
+			if enqueueResult.Published {
+				backfillEnqueued++
+			}
+			if enqueueResult.DedupSuppressed {
+				r.logger.Debug("backfill message dedup-suppressed", zap.String("org", messageOrg), zap.String("repo", messageRepo), zap.String("reason", reason))
+			}
+			if enqueueResult.DroppedByRateLimit {
+				r.logger.Warn("backfill message dropped by dispatcher rate limit", zap.String("org", messageOrg), zap.String("repo", messageRepo), zap.String("reason", reason))
+			}
+		}
 
 		for _, metric := range outcome.Result.Metrics {
 			if metric.UpdatedAt.IsZero() {
