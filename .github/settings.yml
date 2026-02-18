@@ -2,11 +2,12 @@
 ---
 repository:
   # See https://docs.github.com/en/rest/repos/repos#update-a-repository for all available settings.
-  topics: actions, node, template
+  topics: github, opentelemetry, otel, exporter, metrics, prometheus, activity, productivity, observability
+  description: A scraper and exporter for GitHub metrics
   has_issues: true
-  has_projects: true
+  has_projects: false
   has_wiki: false
-  has_downloads: false
+  has_downloads: true
   default_branch: main
   allow_squash_merge: true
   allow_auto_merge: true
@@ -62,12 +63,10 @@ labels:
   - name: go
     color: "#000000"
     description: This issue is related to Go
-  - name: python
-    color: "#000000"
-    description: This issue is related to Python
-  - name: npm
-    color: "#000000"
-    description: This issue is related to Node.js
+collaborators:
+  # See https://docs.github.com/en/rest/collaborators/collaborators#add-a-repository-collaborator for all available options
+  - username: cam3ron2
+    permission: admin
 # See https://docs.github.com/en/rest/reference/teams#add-or-update-team-repository-permissions for available options
 teams: []
 # See https://docs.github.com/en/rest/repos/rules#update-a-repository-ruleset for
@@ -181,3 +180,18 @@ rulesets:
       - actor_id: 5
         actor_type: RepositoryRole
         bypass_mode: always
+  - name: enforce semver tags
+    target: tag
+    enforcement: active
+    conditions:
+      ref_name:
+        include:
+          - "~ALL"
+        exclude: []
+    rules:
+      - type: tag_name_pattern
+        parameters:
+          name: Ensure tag names use semantic versioning
+          negate: false
+          pattern: '^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$'
+          operator: regex
