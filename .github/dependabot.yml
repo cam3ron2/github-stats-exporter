@@ -1,11 +1,5 @@
 ---
 version: 2
-registries:
-  github-niq:
-    type: git
-    url: https://github.com
-    username: x-access-token
-    password: ${{secrets.DEPENDABOT_ORG_TOKEN}}
 updates:
   - package-ecosystem: github-actions
     directory: "/"
@@ -15,8 +9,6 @@ updates:
       - actions
       - dependencies
     open-pull-requests-limit: 10
-    registries:
-      - github-niq
   - package-ecosystem: gomod
     directories:
       - /
