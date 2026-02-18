@@ -7,6 +7,7 @@ The `githubapi` package contains GitHub API integration primitives:
 - GitHub App installation authentication via `ghinstallation`.
 - go-github REST client construction with optional Enterprise base URL override.
 - Request execution wrapper with retry and rate-limit-aware pause behavior.
+- Optional detailed dependency span emission for outbound GitHub calls when telemetry mode is `detailed`.
 - Typed REST endpoint client for org repos, contributor stats, commits, pull requests, pull reviews, and issue comments.
 - Rate-limit header parsing and decision policy.
 - LOC contributor-stats state machine for ready/warming/stale/fallback transitions.
@@ -55,7 +56,7 @@ The `githubapi` package contains GitHub API integration primitives:
 
 ### Methods
 
-- `(*Client) Do(req *http.Request) (*http.Response, CallMetadata, error)`: executes request with retry and rate-limit decision handling.
+- `(*Client) Do(req *http.Request) (*http.Response, CallMetadata, error)`: executes request with retry and rate-limit decision handling and, when enabled, emits detailed OTel span events per attempt.
 - `(*DataClient) ListOrgRepos(ctx context.Context, org string) (OrgReposResult, error)`: lists org repos with pagination and typed status handling.
 - `(*DataClient) GetContributorStats(ctx context.Context, owner, repo string) (ContributorStatsResult, error)`: reads `/stats/contributors` with explicit `202/403/404/409/422` handling.
 - `(*DataClient) ListRepoCommitsWindow(ctx context.Context, owner, repo string, since, until time.Time, maxCommits int) (CommitListResult, error)`: lists commits for a window with pagination and cap support.

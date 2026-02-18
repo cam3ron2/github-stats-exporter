@@ -71,6 +71,13 @@ type repositoryOutcome struct {
 	summaryDelta repoSummaryDelta
 }
 
+type orgRateLimitSummary struct {
+	mu           sync.Mutex
+	minRemaining int
+	resetUnix    int64
+	secondaryHit int
+}
+
 type repoSummaryDelta struct {
 	processed          int
 	statsAccepted      int
@@ -129,12 +136,15 @@ func (s *GitHubOrgScraper) ScrapeOrg(ctx context.Context, org config.GitHubOrgCo
 	if !ok || client == nil {
 		return OrgResult{}, fmt.Errorf("no github client configured for org %q", orgName)
 	}
+	rateSummary := orgRateLimitSummary{
+		minRemaining: -1,
+	}
 
 	reposResult, err := client.ListOrgRepos(ctx, orgName)
 	if err != nil {
 		return OrgResult{}, fmt.Errorf("list org repos for %q: %w", orgName, err)
 	}
-	s.applyRateLimitPacing(reposResult.Metadata)
+	s.applyRateLimitPacing(reposResult.Metadata, &rateSummary)
 
 	if reposResult.Status != githubapi.EndpointStatusOK {
 		return OrgResult{}, fmt.Errorf("list org repos for %q returned status %q", orgName, reposResult.Status)
@@ -149,6 +159,10 @@ func (s *GitHubOrgScraper) ScrapeOrg(ctx context.Context, org config.GitHubOrgCo
 	repos := filterRepositories(reposResult.Repos, org.RepoAllowlist)
 	result.Summary.ReposTargeted = len(repos)
 	if len(repos) == 0 {
+		minRemaining, resetUnix, secondaryHits := rateSummary.snapshot()
+		result.Summary.RateLimitMinRemaining = minRemaining
+		result.Summary.RateLimitResetUnix = resetUnix
+		result.Summary.SecondaryLimitHits = secondaryHits
 		return result, nil
 	}
 
@@ -164,7 +178,7 @@ func (s *GitHubOrgScraper) ScrapeOrg(ctx context.Context, org config.GitHubOrgCo
 	for range workerCount {
 		wg.Go(func() {
 			for repo := range jobs {
-				outcome := s.scrapeRepository(ctx, client, orgName, repo.Name)
+				outcome := s.scrapeRepository(ctx, client, orgName, repo.Name, &rateSummary)
 				outcomes <- outcome
 			}
 		})
@@ -194,22 +208,54 @@ func (s *GitHubOrgScraper) ScrapeOrg(ctx context.Context, org config.GitHubOrgCo
 	}
 	result.Summary.MissedWindows = len(result.MissedWindow)
 	result.Summary.MetricsProduced = len(result.Metrics)
+	minRemaining, resetUnix, secondaryHits := rateSummary.snapshot()
+	result.Summary.RateLimitMinRemaining = minRemaining
+	result.Summary.RateLimitResetUnix = resetUnix
+	result.Summary.SecondaryLimitHits = secondaryHits
 
 	return result, nil
 }
 
-func (s *GitHubOrgScraper) scrapeRepository(ctx context.Context, client GitHubDataClient, org, repo string) repositoryOutcome {
+func (s *GitHubOrgScraper) scrapeRepository(
+	ctx context.Context,
+	client GitHubDataClient,
+	org string,
+	repo string,
+	rateSummary *orgRateLimitSummary,
+) repositoryOutcome {
 	now := s.cfg.Now().UTC()
-	windowStart := now.Add(-7 * 24 * time.Hour)
+	locWindowStart := now.Add(-7 * 24 * time.Hour)
 	activityWindowStart := now.Add(-24 * time.Hour)
 	windowEnd := now
-	summary := repoSummaryDelta{processed: 1}
 	outcome := repositoryOutcome{
-		summaryDelta: summary,
+		summaryDelta: repoSummaryDelta{processed: 1},
 	}
 
-	activityOutcome := s.scrapeRepositoryActivity(ctx, client, org, repo, activityWindowStart, windowEnd)
-	outcome = mergeRepositoryOutcome(outcome, activityOutcome)
+	activityOutcome := s.scrapeRepositoryActivity(
+		ctx,
+		client,
+		org,
+		repo,
+		activityWindowStart,
+		windowEnd,
+		rateSummary,
+	)
+	locOutcome := s.scrapeRepositoryLOC(ctx, client, org, repo, locWindowStart, windowEnd, now, rateSummary)
+
+	return mergeRepositoryOutcome(outcome, mergeRepositoryOutcome(activityOutcome, locOutcome))
+}
+
+func (s *GitHubOrgScraper) scrapeRepositoryLOC(
+	ctx context.Context,
+	client GitHubDataClient,
+	org string,
+	repo string,
+	windowStart time.Time,
+	windowEnd time.Time,
+	observedAt time.Time,
+	rateSummary *orgRateLimitSummary,
+) repositoryOutcome {
+	outcome := repositoryOutcome{}
 
 	statsResult, err := client.GetContributorStats(ctx, org, repo)
 	if err != nil {
@@ -224,13 +270,13 @@ func (s *GitHubOrgScraper) scrapeRepository(ctx context.Context, client GitHubDa
 			}},
 		})
 	}
-	s.applyRateLimitPacing(statsResult.Metadata)
+	s.applyRateLimitPacing(statsResult.Metadata, rateSummary)
 
 	switch statsResult.Status {
 	case githubapi.EndpointStatusAccepted:
 		outcome.summaryDelta.statsAccepted++
 		s.recordLOCState(org, repo, githubapi.LOCEvent{
-			ObservedAt: now,
+			ObservedAt: observedAt,
 			HTTPStatus: 202,
 		})
 		return outcome
@@ -274,9 +320,9 @@ func (s *GitHubOrgScraper) scrapeRepository(ctx context.Context, client GitHubDa
 		})
 	}
 
-	weeklyByUser, _, contributionsNonZero, additionsDeletionsZero := extractLatestCompleteWeek(statsResult.Contributors, now)
+	weeklyByUser, _, contributionsNonZero, additionsDeletionsZero := extractLatestCompleteWeek(statsResult.Contributors, observedAt)
 	state := s.recordLOCState(org, repo, githubapi.LOCEvent{
-		ObservedAt:             now,
+		ObservedAt:             observedAt,
 		HTTPStatus:             200,
 		StatsPresent:           true,
 		ContributionsNonZero:   contributionsNonZero,
@@ -288,19 +334,33 @@ func (s *GitHubOrgScraper) scrapeRepository(ctx context.Context, client GitHubDa
 	}
 
 	if s.cfg.FallbackEnabled && state.Mode == githubapi.LOCModeFallback {
-		fallbackOutcome := s.scrapeRepositoryFallback(ctx, client, org, repo, windowStart, windowEnd)
+		fallbackOutcome := s.scrapeRepositoryFallback(ctx, client, org, repo, windowStart, windowEnd, rateSummary)
 		fallbackOutcome.summaryDelta.fallbackUsed++
 		return mergeRepositoryOutcome(outcome, fallbackOutcome)
 	}
 
 	metrics := make([]store.MetricPoint, 0, len(weeklyByUser)*2)
 	for user, weekly := range weeklyByUser {
-		addMetric, err := NewProductivityMetric(MetricActivityLOCAddedWeekly, org, repo, user, float64(weekly.added), now)
-		if err == nil {
+		addMetric, addErr := NewProductivityMetric(
+			MetricActivityLOCAddedWeekly,
+			org,
+			repo,
+			user,
+			float64(weekly.added),
+			observedAt,
+		)
+		if addErr == nil {
 			metrics = append(metrics, addMetric)
 		}
-		removedMetric, err := NewProductivityMetric(MetricActivityLOCRemovedWeekly, org, repo, user, float64(weekly.removed), now)
-		if err == nil {
+		removedMetric, removeErr := NewProductivityMetric(
+			MetricActivityLOCRemovedWeekly,
+			org,
+			repo,
+			user,
+			float64(weekly.removed),
+			observedAt,
+		)
+		if removeErr == nil {
 			metrics = append(metrics, removedMetric)
 		}
 	}
@@ -315,6 +375,7 @@ func (s *GitHubOrgScraper) scrapeRepositoryActivity(
 	repo string,
 	windowStart time.Time,
 	windowEnd time.Time,
+	rateSummary *orgRateLimitSummary,
 ) repositoryOutcome {
 	metrics := make([]store.MetricPoint, 0, 16)
 	missed := make([]MissedWindow, 0, 4)
@@ -342,7 +403,7 @@ func (s *GitHubOrgScraper) scrapeRepositoryActivity(
 		summary.statsUnavailable++
 		addMissedWindow(repoMissReasonActivityCommits)
 	} else {
-		s.applyRateLimitPacing(commitsResult.Metadata)
+		s.applyRateLimitPacing(commitsResult.Metadata, rateSummary)
 		switch commitsResult.Status {
 		case githubapi.EndpointStatusOK:
 			for _, commit := range commitsResult.Commits {
@@ -372,7 +433,7 @@ func (s *GitHubOrgScraper) scrapeRepositoryActivity(
 		summary.statsUnavailable++
 		addMissedWindow(repoMissReasonActivityPulls)
 	} else {
-		s.applyRateLimitPacing(pullsResult.Metadata)
+		s.applyRateLimitPacing(pullsResult.Metadata, rateSummary)
 		switch pullsResult.Status {
 		case githubapi.EndpointStatusOK:
 			for _, pr := range pullsResult.PullRequests {
@@ -394,7 +455,7 @@ func (s *GitHubOrgScraper) scrapeRepositoryActivity(
 					addMissedWindow(repoMissReasonActivityReviews)
 					continue
 				}
-				s.applyRateLimitPacing(reviewsResult.Metadata)
+				s.applyRateLimitPacing(reviewsResult.Metadata, rateSummary)
 
 				switch reviewsResult.Status {
 				case githubapi.EndpointStatusOK:
@@ -435,7 +496,7 @@ func (s *GitHubOrgScraper) scrapeRepositoryActivity(
 		summary.statsUnavailable++
 		addMissedWindow(repoMissReasonActivityComments)
 	} else {
-		s.applyRateLimitPacing(commentsResult.Metadata)
+		s.applyRateLimitPacing(commentsResult.Metadata, rateSummary)
 		switch commentsResult.Status {
 		case githubapi.EndpointStatusOK:
 			for _, comment := range commentsResult.Comments {
@@ -511,6 +572,7 @@ func (s *GitHubOrgScraper) scrapeRepositoryFallback(
 	repo string,
 	windowStart time.Time,
 	windowEnd time.Time,
+	rateSummary *orgRateLimitSummary,
 ) repositoryOutcome {
 	summary := repoSummaryDelta{}
 
@@ -528,7 +590,7 @@ func (s *GitHubOrgScraper) scrapeRepositoryFallback(
 			summaryDelta: summary,
 		}
 	}
-	s.applyRateLimitPacing(commitListResult.Metadata)
+	s.applyRateLimitPacing(commitListResult.Metadata, rateSummary)
 
 	switch commitListResult.Status {
 	case githubapi.EndpointStatusOK:
@@ -572,7 +634,7 @@ func (s *GitHubOrgScraper) scrapeRepositoryFallback(
 			})
 			continue
 		}
-		s.applyRateLimitPacing(detailResult.Metadata)
+		s.applyRateLimitPacing(detailResult.Metadata, rateSummary)
 
 		switch detailResult.Status {
 		case githubapi.EndpointStatusOK:
@@ -630,6 +692,121 @@ func (s *GitHubOrgScraper) scrapeRepositoryFallback(
 	}
 }
 
+// ScrapeBackfill re-scrapes one missed org/repo window.
+func (s *GitHubOrgScraper) ScrapeBackfill(
+	ctx context.Context,
+	org config.GitHubOrgConfig,
+	repo string,
+	windowStart time.Time,
+	windowEnd time.Time,
+	reason string,
+) (OrgResult, error) {
+	if s == nil {
+		return OrgResult{}, fmt.Errorf("github org scraper is nil")
+	}
+
+	orgName := strings.TrimSpace(org.Org)
+	client, ok := s.clients[orgName]
+	if !ok || client == nil {
+		return OrgResult{}, fmt.Errorf("no github client configured for org %q", orgName)
+	}
+
+	now := s.cfg.Now().UTC()
+	if windowStart.IsZero() {
+		windowStart = now.Add(-24 * time.Hour)
+	}
+	if windowEnd.IsZero() {
+		windowEnd = now
+	}
+	if windowEnd.Before(windowStart) {
+		return OrgResult{}, fmt.Errorf("window_end must be >= window_start")
+	}
+
+	rateSummary := orgRateLimitSummary{
+		minRemaining: -1,
+	}
+	result := OrgResult{}
+	repoName := strings.TrimSpace(repo)
+	repoNames := make([]string, 0, 1)
+
+	if repoName == "" || repoName == "*" {
+		reposResult, err := client.ListOrgRepos(ctx, orgName)
+		if err != nil {
+			return OrgResult{}, fmt.Errorf("list org repos for %q: %w", orgName, err)
+		}
+		s.applyRateLimitPacing(reposResult.Metadata, &rateSummary)
+		if reposResult.Status != githubapi.EndpointStatusOK {
+			return OrgResult{}, fmt.Errorf("list org repos for %q returned status %q", orgName, reposResult.Status)
+		}
+
+		result.Summary.ReposDiscovered = len(reposResult.Repos)
+		repos := filterRepositories(reposResult.Repos, org.RepoAllowlist)
+		result.Summary.ReposTargeted = len(repos)
+		for _, discovered := range repos {
+			repoNames = append(repoNames, discovered.Name)
+		}
+	} else {
+		repoNames = append(repoNames, repoName)
+		result.Summary.ReposDiscovered = 1
+		result.Summary.ReposTargeted = 1
+	}
+
+	for _, repository := range repoNames {
+		outcome := s.scrapeRepositoryBackfill(ctx, client, orgName, repository, windowStart, windowEnd, reason, &rateSummary)
+		result.Metrics = append(result.Metrics, outcome.metrics...)
+		result.MissedWindow = append(result.MissedWindow, outcome.missed...)
+		result.Summary.ReposProcessed += outcome.summaryDelta.processed
+		result.Summary.ReposStatsAccepted += outcome.summaryDelta.statsAccepted
+		result.Summary.ReposStatsForbidden += outcome.summaryDelta.statsForbidden
+		result.Summary.ReposStatsNotFound += outcome.summaryDelta.statsNotFound
+		result.Summary.ReposStatsConflict += outcome.summaryDelta.statsConflict
+		result.Summary.ReposStatsUnprocessable += outcome.summaryDelta.statsUnprocessable
+		result.Summary.ReposStatsUnavailable += outcome.summaryDelta.statsUnavailable
+		result.Summary.ReposNoCompleteWeek += outcome.summaryDelta.noCompleteWeek
+		result.Summary.ReposFallbackUsed += outcome.summaryDelta.fallbackUsed
+		result.Summary.ReposFallbackTruncated += outcome.summaryDelta.fallbackTruncated
+	}
+
+	result.Summary.MissedWindows = len(result.MissedWindow)
+	result.Summary.MetricsProduced = len(result.Metrics)
+	minRemaining, resetUnix, secondaryHits := rateSummary.snapshot()
+	result.Summary.RateLimitMinRemaining = minRemaining
+	result.Summary.RateLimitResetUnix = resetUnix
+	result.Summary.SecondaryLimitHits = secondaryHits
+
+	return result, nil
+}
+
+func (s *GitHubOrgScraper) scrapeRepositoryBackfill(
+	ctx context.Context,
+	client GitHubDataClient,
+	org string,
+	repo string,
+	windowStart time.Time,
+	windowEnd time.Time,
+	reason string,
+	rateSummary *orgRateLimitSummary,
+) repositoryOutcome {
+	normalizedReason := strings.TrimSpace(reason)
+	outcome := repositoryOutcome{
+		summaryDelta: repoSummaryDelta{processed: 1},
+	}
+	now := s.cfg.Now().UTC()
+
+	switch normalizedReason {
+	case repoMissReasonActivityCommits, repoMissReasonActivityPulls, repoMissReasonActivityReviews, repoMissReasonActivityComments:
+		activityOutcome := s.scrapeRepositoryActivity(ctx, client, org, repo, windowStart, windowEnd, rateSummary)
+		return mergeRepositoryOutcome(outcome, activityOutcome)
+	case repoMissReasonContributorStats, repoMissReasonFallbackList, repoMissReasonFallbackDetail, "fallback_truncated":
+		locOutcome := s.scrapeRepositoryLOC(ctx, client, org, repo, windowStart, windowEnd, now, rateSummary)
+		return mergeRepositoryOutcome(outcome, locOutcome)
+	default:
+		activityOutcome := s.scrapeRepositoryActivity(ctx, client, org, repo, windowStart, windowEnd, rateSummary)
+		locOutcome := s.scrapeRepositoryLOC(ctx, client, org, repo, windowStart, windowEnd, now, rateSummary)
+		return mergeRepositoryOutcome(outcome, mergeRepositoryOutcome(activityOutcome, locOutcome))
+	}
+}
+
 func (s *GitHubOrgScraper) recordLOCState(org, repo string, event githubapi.LOCEvent) githubapi.LOCState {
 	key := org + "/" + repo
 
@@ -676,7 +853,10 @@ func (s *GitHubOrgScraper) consumeFallbackBudget(org string, requested int, now 
 	return requested
 }
 
-func (s *GitHubOrgScraper) applyRateLimitPacing(metadata githubapi.CallMetadata) {
+func (s *GitHubOrgScraper) applyRateLimitPacing(metadata githubapi.CallMetadata, summary *orgRateLimitSummary) {
+	if summary != nil {
+		summary.observe(metadata)
+	}
 	if metadata.LastDecision.Allow {
 		return
 	}
@@ -684,6 +864,28 @@ func (s *GitHubOrgScraper) applyRateLimitPacing(metadata githubapi.CallMetadata)
 		return
 	}
 	s.cfg.Sleep(metadata.LastDecision.WaitFor)
+}
+
+func (s *orgRateLimitSummary) observe(metadata githubapi.CallMetadata) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	headers := metadata.LastRateHeaders
+	if headers.Remaining > 0 && (s.minRemaining < 0 || headers.Remaining < s.minRemaining) {
+		s.minRemaining = headers.Remaining
+	}
+	if headers.ResetUnix > s.resetUnix {
+		s.resetUnix = headers.ResetUnix
+	}
+	if headers.SecondaryLimited || metadata.LastDecision.Reason == "secondary_limit" {
+		s.secondaryHit++
+	}
+}
+
+func (s *orgRateLimitSummary) snapshot() (int, int64, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.minRemaining, s.resetUnix, s.secondaryHit
 }
 
 func mergeRepositoryOutcome(left, right repositoryOutcome) repositoryOutcome {

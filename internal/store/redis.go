@@ -25,6 +25,10 @@ type redisCommander interface {
 	HGetAll(ctx context.Context, key string) *redis.MapStringStringCmd
 	Exists(ctx context.Context, keys ...string) *redis.IntCmd
 	SRem(ctx context.Context, key string, members ...any) *redis.IntCmd
+	Incr(ctx context.Context, key string) *redis.IntCmd
+	Get(ctx context.Context, key string) *redis.StringCmd
+	ZAdd(ctx context.Context, key string, members ...redis.Z) *redis.IntCmd
+	ZRangeByScoreWithScores(ctx context.Context, key string, opt *redis.ZRangeBy) *redis.ZSliceCmd
 }
 
 // RedisStoreConfig configures the Redis-backed shared metric store.
@@ -135,6 +139,9 @@ func (s *RedisStore) UpsertMetric(role RuntimeRole, source WriteSource, point Me
 			return fmt.Errorf("set metric ttl: %w", err)
 		}
 	}
+	if _, err := s.recordSeriesChange(ctx, seriesID); err != nil {
+		return fmt.Errorf("record metric change: %w", err)
+	}
 
 	return nil
 }
@@ -172,7 +179,14 @@ func (s *RedisStore) GC(_ time.Time) {
 			continue
 		}
 		if exists == 0 {
-			if remErr := s.client.SRem(ctx, s.metricsIndexKey(), seriesID).Err(); remErr != nil {
+			removedCount, remErr := s.client.SRem(ctx, s.metricsIndexKey(), seriesID).Result()
+			if remErr != nil {
+				continue
+			}
+			if removedCount == 0 {
+				continue
+			}
+			if _, changeErr := s.recordSeriesChange(ctx, seriesID); changeErr != nil {
 				continue
 			}
 		}
@@ -211,6 +225,85 @@ func (s *RedisStore) Snapshot() []MetricPoint {
 		return leftKey < rightKey
 	})
 	return result
+}
+
+// SnapshotCursor returns the current incremental snapshot cursor.
+func (s *RedisStore) SnapshotCursor() (uint64, error) {
+	if s == nil || s.client == nil {
+		return 0, fmt.Errorf("redis store is not initialized")
+	}
+
+	raw, err := s.client.Get(context.Background(), s.metricsSequenceKey()).Result()
+	if err != nil {
+		if err == redis.Nil {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("read snapshot cursor: %w", err)
+	}
+	if raw == "" {
+		return 0, nil
+	}
+
+	cursor, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse snapshot cursor %q: %w", raw, err)
+	}
+	return cursor, nil
+}
+
+// SnapshotDelta returns incremental series changes after the provided cursor.
+func (s *RedisStore) SnapshotDelta(cursor uint64) (SnapshotDelta, error) {
+	if s == nil || s.client == nil {
+		return SnapshotDelta{}, fmt.Errorf("redis store is not initialized")
+	}
+
+	ctx := context.Background()
+	changes, err := s.client.ZRangeByScoreWithScores(ctx, s.metricsChangesKey(), &redis.ZRangeBy{
+		Min: fmt.Sprintf("(%d", cursor),
+		Max: "+inf",
+	}).Result()
+	if err != nil {
+		return SnapshotDelta{}, fmt.Errorf("read snapshot delta: %w", err)
+	}
+
+	delta := SnapshotDelta{
+		NextCursor: cursor,
+		Events:     make([]SnapshotDeltaEvent, 0, len(changes)),
+	}
+	for _, change := range changes {
+		seriesID := fmt.Sprint(change.Member)
+		if seriesID == "" {
+			continue
+		}
+		if change.Score > float64(delta.NextCursor) {
+			delta.NextCursor = uint64(change.Score)
+		}
+
+		fields, readErr := s.client.HGetAll(ctx, s.metricDataKey(seriesID)).Result()
+		if readErr != nil || len(fields) == 0 {
+			delta.Events = append(delta.Events, SnapshotDeltaEvent{
+				SeriesID: seriesID,
+				Deleted:  true,
+			})
+			continue
+		}
+
+		point, ok := decodeMetricPoint(fields)
+		if !ok {
+			delta.Events = append(delta.Events, SnapshotDeltaEvent{
+				SeriesID: seriesID,
+				Deleted:  true,
+			})
+			continue
+		}
+
+		delta.Events = append(delta.Events, SnapshotDeltaEvent{
+			SeriesID: seriesID,
+			Point:    point,
+		})
+	}
+
+	return delta, nil
 }
 
 func decodeMetricPoint(fields map[string]string) (MetricPoint, bool) {
@@ -260,8 +353,33 @@ func (s *RedisStore) prefixed(suffix string) string {
 	return s.namespace + ":" + suffix
 }
 
+func (s *RedisStore) recordSeriesChange(ctx context.Context, seriesID string) (uint64, error) {
+	sequence, err := s.client.Incr(ctx, s.metricsSequenceKey()).Result()
+	if err != nil {
+		return 0, err
+	}
+	if sequence < 0 {
+		return 0, fmt.Errorf("snapshot sequence is negative")
+	}
+	if err := s.client.ZAdd(ctx, s.metricsChangesKey(), redis.Z{
+		Score:  float64(sequence),
+		Member: seriesID,
+	}).Err(); err != nil {
+		return 0, err
+	}
+	return uint64(sequence), nil
+}
+
 func (s *RedisStore) metricsIndexKey() string {
 	return s.prefixed("metrics:index")
+}
+
+func (s *RedisStore) metricsSequenceKey() string {
+	return s.prefixed("metrics:seq")
+}
+
+func (s *RedisStore) metricsChangesKey() string {
+	return s.prefixed("metrics:changes")
 }
 
 func (s *RedisStore) metricDataKey(seriesID string) string {

@@ -4,6 +4,12 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/cam3ron2/github-stats/internal/telemetry"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // RetryConfig configures GitHub client retry behavior.
@@ -53,14 +59,38 @@ func (c *Client) Do(req *http.Request) (*http.Response, CallMetadata, error) {
 		return nil, CallMetadata{}, fmt.Errorf("request is nil")
 	}
 
+	ctx := req.Context()
+	var span trace.Span
+	if telemetry.ShouldTraceDependencies() {
+		ctx, span = otel.Tracer("github-stats/internal/githubapi").Start(
+			ctx,
+			"githubapi.client.do",
+			trace.WithAttributes(
+				attribute.String("http.method", req.Method),
+				attribute.String("http.path", req.URL.EscapedPath()),
+				attribute.Int("github.max_attempts", c.retry.MaxAttempts),
+			),
+		)
+		defer span.End()
+	}
+
 	metadata := CallMetadata{}
 	for attempt := 1; attempt <= c.retry.MaxAttempts; attempt++ {
 		metadata.Attempts = attempt
 
-		nextReq := req.Clone(req.Context())
+		nextReq := req.Clone(ctx)
 		resp, err := c.doer.Do(nextReq)
 		if err != nil {
+			if span != nil {
+				span.RecordError(err)
+				span.AddEvent("attempt_failed", trace.WithAttributes(
+					attribute.Int("github.attempt", attempt),
+				))
+			}
 			if attempt == c.retry.MaxAttempts {
+				if span != nil {
+					span.SetStatus(codes.Error, err.Error())
+				}
 				return nil, metadata, err
 			}
 			c.Sleep(backoffForAttempt(c.retry, attempt))
@@ -72,11 +102,25 @@ func (c *Client) Do(req *http.Request) (*http.Response, CallMetadata, error) {
 		decision := c.ratePolicy.Evaluate(headers)
 		metadata.LastDecision = decision
 
+		if span != nil {
+			span.AddEvent("attempt_completed", trace.WithAttributes(
+				attribute.Int("github.attempt", attempt),
+				attribute.Int("http.status_code", resp.StatusCode),
+				attribute.Int("github.rate_limit_remaining", headers.Remaining),
+				attribute.Int64("github.rate_limit_reset_unix", headers.ResetUnix),
+				attribute.Bool("github.rate_limit_allow", decision.Allow),
+				attribute.String("github.rate_limit_reason", decision.Reason),
+			))
+		}
+
 		if !decision.Allow {
 			if resp.Body != nil {
 				_ = resp.Body.Close()
 			}
 			if attempt == c.retry.MaxAttempts {
+				if span != nil {
+					span.SetStatus(codes.Error, "rate-limited")
+				}
 				return resp, metadata, nil
 			}
 			c.Sleep(decision.WaitFor)
@@ -85,6 +129,9 @@ func (c *Client) Do(req *http.Request) (*http.Response, CallMetadata, error) {
 
 		if isTransientStatus(resp.StatusCode) {
 			if attempt == c.retry.MaxAttempts {
+				if span != nil {
+					span.SetStatus(codes.Error, fmt.Sprintf("transient status %d", resp.StatusCode))
+				}
 				return resp, metadata, nil
 			}
 			if resp.Body != nil {
@@ -94,9 +141,15 @@ func (c *Client) Do(req *http.Request) (*http.Response, CallMetadata, error) {
 			continue
 		}
 
+		if span != nil {
+			span.SetStatus(codes.Ok, "request completed")
+		}
 		return resp, metadata, nil
 	}
 
+	if span != nil {
+		span.SetStatus(codes.Error, "request attempts exhausted")
+	}
 	return nil, metadata, fmt.Errorf("request attempts exhausted")
 }
 

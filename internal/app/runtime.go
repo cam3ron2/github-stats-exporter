@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -125,7 +126,17 @@ func (r *Runtime) QueueDepth() int {
 
 // Handler returns the combined HTTP handler.
 func (r *Runtime) Handler() http.Handler {
-	metricsHandler := exporter.NewOpenMetricsHandler(r.store)
+	refreshInterval := r.cfg.Store.MetricRefreshInterval
+	if refreshInterval <= 0 {
+		refreshInterval = 30 * time.Second
+	}
+	snapshotReader := exporter.NewCachedSnapshotReader(r.store, exporter.CacheConfig{
+		Mode:            r.cfg.Store.ExportCacheMode,
+		RefreshInterval: refreshInterval,
+		Now:             r.Now,
+	})
+
+	metricsHandler := exporter.NewOpenMetricsHandler(snapshotReader)
 	healthHandler := health.NewHandler(r)
 	return NewHTTPHandler(metricsHandler, healthHandler)
 }
@@ -237,7 +248,22 @@ func (r *Runtime) RunLeaderCycle(ctx context.Context) error {
 	}
 
 	outcomes := r.scrapeMgr.ScrapeAll(ctx)
+	return r.processLeaderOutcomes(now, cycleStart, outcomes)
+}
 
+// RunLeaderOrgCycle executes one leader scrape cycle for a specific organization.
+func (r *Runtime) RunLeaderOrgCycle(ctx context.Context, org config.GitHubOrgConfig) error {
+	now := r.Now()
+	cycleStart := time.Now()
+	if r.shouldSkipGitHubScrape(now) {
+		return r.runCooldownCycleForOrg(now, org)
+	}
+
+	outcome := r.scrapeMgr.ScrapeOrg(ctx, org)
+	return r.processLeaderOutcomes(now, cycleStart, []scrape.Outcome{outcome})
+}
+
+func (r *Runtime) processLeaderOutcomes(now time.Time, cycleStart time.Time, outcomes []scrape.Outcome) error {
 	var resultErr error
 	orgFailures := 0
 	metricsWritten := 0
@@ -255,6 +281,7 @@ func (r *Runtime) RunLeaderCycle(ctx context.Context) error {
 				"org":    outcome.Org,
 				"result": "failure",
 			})
+			r.recordGitHubRateLimitMetrics(now, outcome.Org, outcome.Result.Summary)
 			r.logger.Warn("organization scrape failed", zap.String("org", outcome.Org), zap.Error(outcome.Err))
 			orgFailures++
 			if resultErr == nil {
@@ -295,6 +322,7 @@ func (r *Runtime) RunLeaderCycle(ctx context.Context) error {
 			"org":    outcome.Org,
 			"result": "success",
 		})
+		r.recordGitHubRateLimitMetrics(now, outcome.Org, outcome.Result.Summary)
 		r.logger.Debug("organization scrape succeeded", zap.String("org", outcome.Org), zap.Int("metric_points", len(outcome.Result.Metrics)))
 		r.logger.Debug(
 			"organization scrape summary",
@@ -313,6 +341,9 @@ func (r *Runtime) RunLeaderCycle(ctx context.Context) error {
 			zap.Int("repos_fallback_truncated", outcome.Result.Summary.ReposFallbackTruncated),
 			zap.Int("missed_windows", outcome.Result.Summary.MissedWindows),
 			zap.Int("metrics_produced", outcome.Result.Summary.MetricsProduced),
+			zap.Int("rate_limit_remaining_min", outcome.Result.Summary.RateLimitMinRemaining),
+			zap.Int64("rate_limit_reset_unixtime", outcome.Result.Summary.RateLimitResetUnix),
+			zap.Int("secondary_limit_hits", outcome.Result.Summary.SecondaryLimitHits),
 		)
 
 		for _, missed := range outcome.Result.MissedWindow {
@@ -429,21 +460,66 @@ func (r *Runtime) RunLeaderCycle(ctx context.Context) error {
 }
 
 func (r *Runtime) runLeaderLoop(ctx context.Context) {
-	interval := r.leaderInterval()
+	if len(r.cfg.GitHub.Orgs) == 0 {
+		interval := r.leaderInterval()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		if err := r.RunLeaderCycle(ctx); err != nil {
+			r.logger.Warn("leader scrape cycle finished with errors", zap.Error(err))
+		}
+		for {
+			select {
+			case <-ctx.Done():
+				r.logger.Debug("leader loop stopped")
+				return
+			case <-ticker.C:
+				if err := r.RunLeaderCycle(ctx); err != nil {
+					r.logger.Warn("leader scrape cycle finished with errors", zap.Error(err))
+				}
+			}
+		}
+	}
+
+	var wg sync.WaitGroup
+	for _, org := range r.cfg.GitHub.Orgs {
+		org := org
+		wg.Go(func() {
+			r.runLeaderOrgLoop(ctx, org)
+		})
+	}
+
+	<-ctx.Done()
+	wg.Wait()
+	r.logger.Debug("leader loop stopped")
+}
+
+func (r *Runtime) runLeaderOrgLoop(ctx context.Context, org config.GitHubOrgConfig) {
+	interval := org.ScrapeInterval
+	if interval <= 0 {
+		interval = 5 * time.Minute
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	if err := r.RunLeaderCycle(ctx); err != nil {
-		r.logger.Warn("leader scrape cycle finished with errors", zap.Error(err))
+	if err := r.RunLeaderOrgCycle(ctx, org); err != nil {
+		r.logger.Warn(
+			"leader organization scrape cycle finished with errors",
+			zap.String("org", org.Org),
+			zap.Error(err),
+		)
 	}
 	for {
 		select {
 		case <-ctx.Done():
-			r.logger.Debug("leader loop stopped")
 			return
 		case <-ticker.C:
-			if err := r.RunLeaderCycle(ctx); err != nil {
-				r.logger.Warn("leader scrape cycle finished with errors", zap.Error(err))
+			if err := r.RunLeaderOrgCycle(ctx, org); err != nil {
+				r.logger.Warn(
+					"leader organization scrape cycle finished with errors",
+					zap.String("org", org.Org),
+					zap.Error(err),
+				)
 			}
 		}
 	}
@@ -463,40 +539,117 @@ func (r *Runtime) runFollowerLoop(ctx context.Context) {
 		lockTTL = maxAge
 	}
 
-	r.queue.Consume(ctx, func(msg backfill.Message) error {
-		if msg.JobID != "" && !r.store.AcquireJobLock(msg.JobID, lockTTL, r.Now()) {
-			r.logger.Debug("follower skipped duplicate backfill message", zap.String("job_id", msg.JobID))
-			return nil
-		}
-		err := r.store.UpsertMetric(store.RoleFollower, store.SourceWorkerBackfill, store.MetricPoint{
-			Name: "gh_exporter_backfill_jobs_processed_total",
-			Labels: map[string]string{
-				"org":    msg.Org,
-				"repo":   msg.Repo,
-				"result": "processed",
-			},
-			Value:     1,
-			UpdatedAt: r.Now(),
+	workerCount := r.cfg.Backfill.ConsumerCount
+	if workerCount <= 0 {
+		workerCount = 1
+	}
+
+	var wg sync.WaitGroup
+	for range workerCount {
+		wg.Go(func() {
+			r.queue.Consume(ctx, func(msg backfill.Message) error {
+				return r.processBackfillMessage(ctx, msg, lockTTL)
+			}, maxAge, r.Now)
 		})
-		if err != nil {
-			r.recordFollowerMetricBestEffort(r.Now(), "gh_exporter_store_write_total", 1, map[string]string{
-				"source": string(store.SourceWorkerBackfill),
-				"result": "failure",
-			})
-			r.logger.Warn("follower failed to persist backfill metric", zap.String("org", msg.Org), zap.String("repo", msg.Repo), zap.Error(err))
-			return err
-		}
-		r.recordFollowerMetricBestEffort(r.Now(), "gh_exporter_store_write_total", 1, map[string]string{
-			"source": string(store.SourceWorkerBackfill),
-			"result": "success",
-		})
-		r.logger.Debug("follower processed backfill message", zap.String("org", msg.Org), zap.String("repo", msg.Repo), zap.Int("queue_depth", r.queue.Depth()))
-		return nil
-	}, maxAge, r.Now)
+	}
+	wg.Wait()
 
 	r.mu.Lock()
 	r.consumerHealthy = false
 	r.mu.Unlock()
+}
+
+func (r *Runtime) processBackfillMessage(ctx context.Context, msg backfill.Message, lockTTL time.Duration) error {
+	lockID := msg.JobID
+	if msg.JobID != "" && msg.Attempt > 0 {
+		lockID = fmt.Sprintf("%s:%d", msg.JobID, msg.Attempt)
+	}
+	if lockID != "" && !r.store.AcquireJobLock(lockID, lockTTL, r.Now()) {
+		r.logger.Debug(
+			"follower skipped duplicate backfill message",
+			zap.String("job_id", lockID),
+			zap.Int("attempt", msg.Attempt),
+		)
+		return nil
+	}
+
+	result, err := r.scrapeMgr.ScrapeBackfill(
+		ctx,
+		msg.Org,
+		msg.Repo,
+		msg.WindowStart,
+		msg.WindowEnd,
+		msg.Reason,
+	)
+	if err != nil {
+		r.recordFollowerMetricBestEffort(r.Now(), "gh_exporter_backfill_jobs_processed_total", 1, map[string]string{
+			"org":    msg.Org,
+			"repo":   msg.Repo,
+			"result": "failed",
+		})
+		r.logger.Warn(
+			"follower backfill scrape failed",
+			zap.String("org", msg.Org),
+			zap.String("repo", msg.Repo),
+			zap.String("reason", msg.Reason),
+			zap.Error(err),
+		)
+		return err
+	}
+
+	writeSuccess := 0
+	for _, point := range result.Metrics {
+		if point.UpdatedAt.IsZero() {
+			point.UpdatedAt = r.Now()
+		}
+		if upsertErr := r.store.UpsertMetric(store.RoleFollower, store.SourceWorkerBackfill, point); upsertErr != nil {
+			r.recordFollowerMetricBestEffort(r.Now(), "gh_exporter_store_write_total", 1, map[string]string{
+				"source": string(store.SourceWorkerBackfill),
+				"result": "failure",
+			})
+			r.recordFollowerMetricBestEffort(r.Now(), "gh_exporter_backfill_jobs_processed_total", 1, map[string]string{
+				"org":    msg.Org,
+				"repo":   msg.Repo,
+				"result": "failed",
+			})
+			r.logger.Warn(
+				"follower failed to persist backfill metric",
+				zap.String("org", msg.Org),
+				zap.String("repo", msg.Repo),
+				zap.String("metric", point.Name),
+				zap.Error(upsertErr),
+			)
+			return upsertErr
+		}
+		writeSuccess++
+	}
+
+	if len(result.MissedWindow) > 0 {
+		r.recordFollowerMetricBestEffort(r.Now(), "gh_exporter_backfill_jobs_processed_total", 1, map[string]string{
+			"org":    msg.Org,
+			"repo":   msg.Repo,
+			"result": "failed",
+		})
+		return fmt.Errorf("backfill scrape returned %d missed windows", len(result.MissedWindow))
+	}
+
+	r.recordFollowerMetricBestEffort(r.Now(), "gh_exporter_store_write_total", float64(writeSuccess), map[string]string{
+		"source": string(store.SourceWorkerBackfill),
+		"result": "success",
+	})
+	r.recordFollowerMetricBestEffort(r.Now(), "gh_exporter_backfill_jobs_processed_total", 1, map[string]string{
+		"org":    msg.Org,
+		"repo":   msg.Repo,
+		"result": "processed",
+	})
+	r.logger.Debug(
+		"follower processed backfill message",
+		zap.String("org", msg.Org),
+		zap.String("repo", msg.Repo),
+		zap.Int("metrics_written", writeSuccess),
+		zap.Int("queue_depth", r.queue.Depth()),
+	)
+	return nil
 }
 
 func (r *Runtime) leaderInterval() time.Duration {
@@ -599,6 +752,111 @@ func (r *Runtime) runCooldownCycle(now time.Time) error {
 	r.recordDependencyHealthMetrics(now)
 	r.store.GC(now)
 	return nil
+}
+
+func (r *Runtime) runCooldownCycleForOrg(now time.Time, org config.GitHubOrgConfig) error {
+	r.recordLeaderCycleMetricBestEffort(now, "gh_exporter_scrape_runs_total", 1, map[string]string{
+		"org":    org.Org,
+		"result": "skipped_unhealthy",
+	})
+
+	enqueueResult := r.dispatcher.EnqueueMissing(backfill.MessageInput{
+		Org:         org.Org,
+		Repo:        "*",
+		WindowStart: now,
+		WindowEnd:   now,
+		Reason:      "github_unhealthy",
+		Now:         now,
+	})
+	if enqueueResult.Published {
+		r.recordLeaderCycleMetricBestEffort(now, "gh_exporter_backfill_jobs_enqueued_total", 1, map[string]string{
+			"org":    org.Org,
+			"reason": "github_unhealthy",
+		})
+	}
+	if enqueueResult.DedupSuppressed {
+		r.recordLeaderCycleMetricBestEffort(now, "gh_exporter_backfill_jobs_deduped_total", 1, map[string]string{
+			"org":    org.Org,
+			"reason": "github_unhealthy",
+		})
+	}
+	if enqueueResult.DroppedByRateLimit {
+		r.recordLeaderCycleMetricBestEffort(now, "gh_exporter_backfill_enqueues_dropped_total", 1, map[string]string{
+			"org":    org.Org,
+			"reason": "org_rate_cap",
+		})
+	}
+
+	r.recordLeaderCycleMetricBestEffort(now, "gh_exporter_leader_cycle_last_run_unixtime", float64(now.Unix()), nil)
+	r.recordDependencyHealthMetrics(now)
+	r.store.GC(now)
+	return nil
+}
+
+func (r *Runtime) recordGitHubRateLimitMetrics(now time.Time, org string, summary scrape.OrgSummary) {
+	installationID := r.installationIDLabel(org)
+	labels := map[string]string{
+		"org":             org,
+		"installation_id": installationID,
+	}
+	if summary.RateLimitMinRemaining >= 0 {
+		r.recordLeaderCycleMetricBestEffort(
+			now,
+			"gh_exporter_github_rate_limit_remaining",
+			float64(summary.RateLimitMinRemaining),
+			labels,
+		)
+		r.recordLeaderCycleMetricBestEffort(
+			now,
+			"gh_app_rate_limit_remaining",
+			float64(summary.RateLimitMinRemaining),
+			labels,
+		)
+	}
+	if summary.RateLimitResetUnix > 0 {
+		r.recordLeaderCycleMetricBestEffort(
+			now,
+			"gh_exporter_github_rate_limit_reset_unixtime",
+			float64(summary.RateLimitResetUnix),
+			labels,
+		)
+	}
+	if summary.SecondaryLimitHits > 0 {
+		r.recordLeaderCycleMetricBestEffort(
+			now,
+			"gh_exporter_github_secondary_limit_hits_total",
+			float64(summary.SecondaryLimitHits),
+			map[string]string{"org": org},
+		)
+	}
+
+	threshold := r.cfg.RateLimit.MinRemainingThreshold
+	if threshold <= 0 || summary.RateLimitMinRemaining < 0 {
+		return
+	}
+	if summary.RateLimitMinRemaining <= threshold {
+		r.logger.Warn(
+			"github app rate limit is below configured threshold",
+			zap.String("org", org),
+			zap.String("installation_id", installationID),
+			zap.Int("remaining", summary.RateLimitMinRemaining),
+			zap.Int("threshold", threshold),
+			zap.Int64("reset_unixtime", summary.RateLimitResetUnix),
+		)
+	}
+}
+
+func (r *Runtime) installationIDLabel(org string) string {
+	for _, candidate := range r.cfg.GitHub.Orgs {
+		if candidate.Org != org {
+			continue
+		}
+		if candidate.InstallationID <= 0 {
+			break
+		}
+		return fmt.Sprintf("%d", candidate.InstallationID)
+	}
+	return "unknown"
 }
 
 func (r *Runtime) updateGitHubHealthLocked(now time.Time, cycleSuccessful bool) {

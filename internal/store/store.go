@@ -37,6 +37,19 @@ type MetricPoint struct {
 	UpdatedAt time.Time
 }
 
+// SnapshotDeltaEvent is one incremental snapshot change for a series.
+type SnapshotDeltaEvent struct {
+	SeriesID string
+	Point    MetricPoint
+	Deleted  bool
+}
+
+// SnapshotDelta contains a set of incremental changes after a cursor.
+type SnapshotDelta struct {
+	NextCursor uint64
+	Events     []SnapshotDeltaEvent
+}
+
 type storedMetric struct {
 	point MetricPoint
 }

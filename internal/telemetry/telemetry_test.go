@@ -84,3 +84,48 @@ func TestSetup(t *testing.T) {
 		})
 	}
 }
+
+func TestTraceModeNormalizationAndDependencyTracing(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name                 string
+		mode                 string
+		wantMode             string
+		wantTraceDependences bool
+	}{
+		{
+			name:                 "detailed_traces_dependencies",
+			mode:                 "detailed",
+			wantMode:             "detailed",
+			wantTraceDependences: true,
+		},
+		{
+			name:                 "sampled_omits_dependency_details",
+			mode:                 "sampled",
+			wantMode:             "sampled",
+			wantTraceDependences: false,
+		},
+		{
+			name:                 "unknown_defaults_to_sampled",
+			mode:                 "unexpected",
+			wantMode:             "sampled",
+			wantTraceDependences: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			setTraceMode(tc.mode)
+			if got := TraceMode(); got != tc.wantMode {
+				t.Fatalf("TraceMode() = %q, want %q", got, tc.wantMode)
+			}
+			if got := ShouldTraceDependencies(); got != tc.wantTraceDependences {
+				t.Fatalf("ShouldTraceDependencies() = %t, want %t", got, tc.wantTraceDependences)
+			}
+		})
+	}
+}

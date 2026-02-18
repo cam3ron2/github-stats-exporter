@@ -10,13 +10,14 @@ The `app` package wires runtime role behavior (leader vs follower), scrape/backf
   - RabbitMQ management API queue when AMQP config is present.
   - In-memory queue fallback if RabbitMQ init fails.
 - Leader mode runs scheduled scrape cycles and writes metrics to the shared store.
+- In multi-org mode, leader scheduling runs one ticker loop per org using each org's configured `scrape_interval`.
 - Each leader cycle also writes `gh_exporter_leader_cycle_last_run_unixtime` so `/metrics` is non-empty even when no activity metrics are produced.
 - Leader cycles enqueue targeted backfill for both whole-org failures and per-repo missed windows returned by scraper partial results.
 - GitHub unhealthy cooldown gates scheduled scraping after repeated failures and enqueues `github_unhealthy` backfill jobs while cooling down.
-- Leader cycles run store GC and emit operational metrics (`scrape_runs_total`, `store_write_total`, backfill enqueue counters, dependency health).
-- Follower mode consumes backfill jobs, applies idempotency locks, and writes backfill processing metrics.
+- Leader cycles run store GC and emit operational metrics (`scrape_runs_total`, `store_write_total`, backfill enqueue counters, rate-limit metrics, dependency health).
+- Follower mode consumes backfill jobs with configurable worker fan-out, re-scrapes missed windows, applies idempotency locks, and writes backfill processing metrics.
 - Health status is evaluated from role-aware dependency flags and continuously exported as `gh_exporter_dependency_health`.
-- HTTP routing exposes `/metrics`, `/livez`, `/readyz`, and `/healthz`.
+- HTTP routing exposes `/metrics`, `/livez`, `/readyz`, and `/healthz`, with `/metrics` backed by configurable snapshot caching (`full` or `incremental` refresh).
 - Runtime logs include role startup context plus per-cycle scrape summaries for easier operational debugging.
 
 ## API reference

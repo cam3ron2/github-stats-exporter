@@ -1,5 +1,4 @@
 ---
-version: "3.9"
 services:
   github-stats:
     build:
@@ -14,10 +13,41 @@ services:
     volumes:
       - ./config/local.yaml:/app/config/local.yaml:ro
       - ./config/keys:/app/keys:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     depends_on:
       redis:
         condition: service_healthy
       rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+  github-stats-follower:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: github-stats:dev
+    command: ["--config=/app/config/local.yaml"]
+    environment:
+      GITHUB_STATS_INITIAL_ROLE: "follower"
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./config/local.yaml:/app/config/local.yaml:ro
+      - ./config/keys:/app/keys:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      github-stats:
         condition: service_healthy
     restart: unless-stopped
   redis:

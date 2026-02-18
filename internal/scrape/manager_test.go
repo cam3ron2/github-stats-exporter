@@ -20,6 +20,14 @@ type fakeOrgScraper struct {
 	calls   []string
 }
 
+type fakeBackfillOrgScraper struct {
+	result         OrgResult
+	err            error
+	backfillResult OrgResult
+	backfillErr    error
+	backfillCalled bool
+}
+
 func (s *fakeOrgScraper) ScrapeOrg(ctx context.Context, org config.GitHubOrgConfig) (OrgResult, error) {
 	s.mu.Lock()
 	s.calls = append(s.calls, org.Org)
@@ -42,6 +50,22 @@ func (s *fakeOrgScraper) Calls() []string {
 	copied := make([]string, len(s.calls))
 	copy(copied, s.calls)
 	return copied
+}
+
+func (s *fakeBackfillOrgScraper) ScrapeOrg(_ context.Context, _ config.GitHubOrgConfig) (OrgResult, error) {
+	return s.result, s.err
+}
+
+func (s *fakeBackfillOrgScraper) ScrapeBackfill(
+	_ context.Context,
+	_ config.GitHubOrgConfig,
+	_ string,
+	_ time.Time,
+	_ time.Time,
+	_ string,
+) (OrgResult, error) {
+	s.backfillCalled = true
+	return s.backfillResult, s.backfillErr
 }
 
 func TestManagerScrapeAllParallel(t *testing.T) {
@@ -145,5 +169,105 @@ func TestManagerScrapeAllCollectsErrorsPerOrg(t *testing.T) {
 				t.Fatalf("error = %q, missing %q", matched.Err.Error(), tc.errSubstr)
 			}
 		})
+	}
+}
+
+func TestManagerScrapeBackfillUsesBackfillScraper(t *testing.T) {
+	t.Parallel()
+
+	orgs := []config.GitHubOrgConfig{{Org: "org-a"}}
+	scraper := &fakeBackfillOrgScraper{
+		backfillResult: OrgResult{
+			Metrics: []store.MetricPoint{
+				{
+					Name:   "gh_activity_commits_24h",
+					Labels: map[string]string{"org": "org-a", "repo": "repo-a", "user": "alice"},
+					Value:  5,
+				},
+			},
+		},
+	}
+
+	manager := NewManager(scraper, orgs)
+	got, err := manager.ScrapeBackfill(
+		context.Background(),
+		"org-a",
+		"repo-a",
+		time.Unix(1739836800, 0),
+		time.Unix(1739836800, 0).Add(time.Hour),
+		"scrape_error",
+	)
+	if err != nil {
+		t.Fatalf("ScrapeBackfill() unexpected error: %v", err)
+	}
+	if !scraper.backfillCalled {
+		t.Fatalf("ScrapeBackfill() did not invoke backfill scraper")
+	}
+	if len(got.Metrics) != 1 {
+		t.Fatalf("ScrapeBackfill() metrics len = %d, want 1", len(got.Metrics))
+	}
+}
+
+func TestManagerScrapeBackfillFallbackFiltersRepo(t *testing.T) {
+	t.Parallel()
+
+	orgs := []config.GitHubOrgConfig{{Org: "org-a"}}
+	scraper := &fakeOrgScraper{
+		results: map[string]OrgResult{
+			"org-a": {
+				Metrics: []store.MetricPoint{
+					{
+						Name:   "gh_activity_commits_24h",
+						Labels: map[string]string{"org": "org-a", "repo": "repo-a", "user": "alice"},
+						Value:  5,
+					},
+					{
+						Name:   "gh_activity_commits_24h",
+						Labels: map[string]string{"org": "org-a", "repo": "repo-b", "user": "bob"},
+						Value:  3,
+					},
+				},
+			},
+		},
+		errors: map[string]error{},
+	}
+
+	manager := NewManager(scraper, orgs)
+	got, err := manager.ScrapeBackfill(
+		context.Background(),
+		"org-a",
+		"repo-b",
+		time.Unix(1739836800, 0),
+		time.Unix(1739836800, 0).Add(time.Hour),
+		"scrape_error",
+	)
+	if err != nil {
+		t.Fatalf("ScrapeBackfill() unexpected error: %v", err)
+	}
+	if len(got.Metrics) != 1 {
+		t.Fatalf("ScrapeBackfill() metrics len = %d, want 1", len(got.Metrics))
+	}
+	if got.Metrics[0].Labels["repo"] != "repo-b" {
+		t.Fatalf("ScrapeBackfill() repo = %q, want repo-b", got.Metrics[0].Labels["repo"])
+	}
+}
+
+func TestManagerScrapeBackfillUnknownOrg(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(&fakeOrgScraper{}, []config.GitHubOrgConfig{{Org: "org-a"}})
+	_, err := manager.ScrapeBackfill(
+		context.Background(),
+		"org-b",
+		"repo-a",
+		time.Unix(1739836800, 0),
+		time.Unix(1739836800, 0).Add(time.Hour),
+		"scrape_error",
+	)
+	if err == nil {
+		t.Fatalf("ScrapeBackfill() expected error for unknown org, got nil")
+	}
+	if !strings.Contains(err.Error(), "organization \"org-b\" is not configured") {
+		t.Fatalf("ScrapeBackfill() error = %q, want unknown org error", err.Error())
 	}
 }

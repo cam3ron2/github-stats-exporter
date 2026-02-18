@@ -16,6 +16,8 @@ The `store` package manages shared metric state and distributed locks.
 - `RuntimeRole`: writer role enum (`leader`, `follower`).
 - `WriteSource`: write-path enum (`leader_scrape`, `worker_backfill`).
 - `MetricPoint`: one metric sample (`Name`, `Labels`, `Value`, `UpdatedAt`).
+- `SnapshotDeltaEvent`: one incremental series change (`SeriesID`, `Point`, `Deleted`).
+- `SnapshotDelta`: incremental change batch with `NextCursor`.
 - `MemoryStore`: in-memory shared store.
 - `RedisStoreConfig`: Redis store settings (`Namespace`, `Retention`, `MaxSeries`).
 - `RedisStore`: Redis-backed shared store.
@@ -45,3 +47,5 @@ The `store` package manages shared metric state and distributed locks.
 - `Acquire(key string, ttl time.Duration, now time.Time) bool`: deduper adapter alias.
 - `GC(now time.Time)`: cleans stale index members whose metric keys have expired.
 - `Snapshot() []MetricPoint`: reads indexed series from Redis and returns sorted snapshot.
+- `SnapshotCursor() (uint64, error)`: returns current incremental cursor sequence.
+- `SnapshotDelta(cursor uint64) (SnapshotDelta, error)`: returns changed/deleted series after a cursor for incremental exporter refresh.

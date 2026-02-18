@@ -3,9 +3,11 @@ package app
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/cam3ron2/github-stats/internal/backfill"
 	"github.com/cam3ron2/github-stats/internal/config"
 	"github.com/cam3ron2/github-stats/internal/health"
 	"github.com/cam3ron2/github-stats/internal/scrape"
@@ -385,6 +387,76 @@ func TestRuntimeRunLeaderCycleWritesOperationalMetrics(t *testing.T) {
 	}
 }
 
+func TestRuntimeRunLeaderCycleWritesRateLimitMetrics(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	now := time.Unix(1739836800, 0)
+	resetUnix := now.Add(7 * time.Minute).Unix()
+	runtime := NewRuntime(cfg, &fakeOrgScraper{
+		result: scrape.OrgResult{
+			Summary: scrape.OrgSummary{
+				RateLimitMinRemaining: 1234,
+				RateLimitResetUnix:    resetUnix,
+				SecondaryLimitHits:    2,
+			},
+		},
+	})
+	runtime.Now = func() time.Time { return now }
+
+	if err := runtime.RunLeaderCycle(context.Background()); err != nil {
+		t.Fatalf("RunLeaderCycle() unexpected error: %v", err)
+	}
+
+	snapshot := runtime.Store().Snapshot()
+	testCases := []struct {
+		name      string
+		metric    string
+		labels    map[string]string
+		wantValue float64
+	}{
+		{
+			name:      "exporter_rate_limit_remaining",
+			metric:    "gh_exporter_github_rate_limit_remaining",
+			labels:    map[string]string{"org": "org-a", "installation_id": "2"},
+			wantValue: 1234,
+		},
+		{
+			name:      "app_rate_limit_remaining",
+			metric:    "gh_app_rate_limit_remaining",
+			labels:    map[string]string{"org": "org-a", "installation_id": "2"},
+			wantValue: 1234,
+		},
+		{
+			name:      "rate_limit_reset_unix",
+			metric:    "gh_exporter_github_rate_limit_reset_unixtime",
+			labels:    map[string]string{"org": "org-a", "installation_id": "2"},
+			wantValue: float64(resetUnix),
+		},
+		{
+			name:      "secondary_limit_hits",
+			metric:    "gh_exporter_github_secondary_limit_hits_total",
+			labels:    map[string]string{"org": "org-a"},
+			wantValue: 2,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			point := findMetricWithLabels(snapshot, tc.metric, tc.labels)
+			if point == nil {
+				t.Fatalf("missing metric %s labels=%v", tc.metric, tc.labels)
+			}
+			if point.Value != tc.wantValue {
+				t.Fatalf("%s value = %v, want %v", tc.metric, point.Value, tc.wantValue)
+			}
+		})
+	}
+}
+
 func TestRuntimeRunLeaderCycleRunsStoreGC(t *testing.T) {
 	t.Parallel()
 
@@ -412,6 +484,198 @@ func TestRuntimeRunLeaderCycleRunsStoreGC(t *testing.T) {
 	points := runtime.Store().Snapshot()
 	if metric := findMetric(points, "gh_activity_commits_24h"); metric != nil {
 		t.Fatalf("stale activity metric was not garbage-collected")
+	}
+}
+
+type singleMessageQueue struct {
+	message backfill.Message
+}
+
+func (q *singleMessageQueue) Publish(_ backfill.Message) error {
+	return nil
+}
+
+func (q *singleMessageQueue) Consume(
+	_ context.Context,
+	handler func(backfill.Message) error,
+	_ time.Duration,
+	_ func() time.Time,
+) {
+	_ = handler(q.message)
+}
+
+func (q *singleMessageQueue) Depth() int {
+	return 0
+}
+
+type countingConsumeQueue struct {
+	mu           sync.Mutex
+	consumeCalls int
+}
+
+func (q *countingConsumeQueue) Publish(_ backfill.Message) error {
+	return nil
+}
+
+func (q *countingConsumeQueue) Consume(
+	ctx context.Context,
+	_ func(backfill.Message) error,
+	_ time.Duration,
+	_ func() time.Time,
+) {
+	q.mu.Lock()
+	q.consumeCalls++
+	q.mu.Unlock()
+	<-ctx.Done()
+}
+
+func (q *countingConsumeQueue) Depth() int {
+	return 0
+}
+
+func (q *countingConsumeQueue) callCount() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.consumeCalls
+}
+
+type orgCountingScraper struct {
+	mu     sync.Mutex
+	counts map[string]int
+}
+
+func (s *orgCountingScraper) ScrapeOrg(_ context.Context, org config.GitHubOrgConfig) (scrape.OrgResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.counts == nil {
+		s.counts = make(map[string]int)
+	}
+	s.counts[org.Org]++
+	return scrape.OrgResult{}, nil
+}
+
+func (s *orgCountingScraper) count(org string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.counts[org]
+}
+
+func TestRuntimeFollowerConsumesBackfillAndWritesScrapedMetrics(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	now := time.Unix(1739836800, 0).UTC()
+	runtime := NewRuntime(cfg, &fakeOrgScraper{
+		result: scrape.OrgResult{
+			Metrics: []store.MetricPoint{
+				{
+					Name: "gh_activity_commits_24h",
+					Labels: map[string]string{
+						"org":  "org-a",
+						"repo": "repo-a",
+						"user": "alice",
+					},
+					Value:     3,
+					UpdatedAt: now,
+				},
+			},
+		},
+	})
+	runtime.Now = func() time.Time { return now }
+	runtime.queue = &singleMessageQueue{
+		message: backfill.Message{
+			JobID:       "job-1",
+			Org:         "org-a",
+			Repo:        "repo-a",
+			WindowStart: now.Add(-time.Hour),
+			WindowEnd:   now,
+			Reason:      "activity_commits_failed",
+			Attempt:     1,
+			MaxAttempts: 7,
+			CreatedAt:   now,
+		},
+	}
+
+	runtime.runFollowerLoop(context.Background())
+
+	snapshot := runtime.Store().Snapshot()
+	if findMetric(snapshot, "gh_activity_commits_24h") == nil {
+		t.Fatalf("missing gh_activity_commits_24h after follower backfill consume")
+	}
+}
+
+func TestRuntimeFollowerUsesConfiguredConsumerCount(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	cfg.Backfill.ConsumerCount = 3
+	queue := &countingConsumeQueue{}
+	runtime := NewRuntime(cfg, &fakeOrgScraper{})
+	runtime.queue = queue
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		runtime.runFollowerLoop(ctx)
+		close(done)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if queue.callCount() >= cfg.Backfill.ConsumerCount {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	if queue.callCount() != cfg.Backfill.ConsumerCount {
+		t.Fatalf("consume worker count = %d, want %d", queue.callCount(), cfg.Backfill.ConsumerCount)
+	}
+}
+
+func TestRuntimeLeaderLoopHonorsPerOrgIntervals(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	cfg.GitHub.Orgs = []config.GitHubOrgConfig{
+		{
+			Org:            "org-fast",
+			AppID:          1,
+			InstallationID: 2,
+			PrivateKeyPath: "/tmp/key-fast",
+			ScrapeInterval: 40 * time.Millisecond,
+		},
+		{
+			Org:            "org-slow",
+			AppID:          3,
+			InstallationID: 4,
+			PrivateKeyPath: "/tmp/key-slow",
+			ScrapeInterval: 120 * time.Millisecond,
+		},
+	}
+
+	scraper := &orgCountingScraper{}
+	runtime := NewRuntime(cfg, scraper)
+	runtime.Now = time.Now
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runtime.StartLeader(ctx)
+	time.Sleep(420 * time.Millisecond)
+	runtime.StopLeader()
+	time.Sleep(60 * time.Millisecond)
+
+	fastCount := scraper.count("org-fast")
+	slowCount := scraper.count("org-slow")
+
+	if slowCount == 0 {
+		t.Fatalf("org-slow scrape count = 0, want > 0")
+	}
+	if fastCount <= slowCount {
+		t.Fatalf("org-fast scrape count = %d, org-slow scrape count = %d; want org-fast > org-slow", fastCount, slowCount)
 	}
 }
 

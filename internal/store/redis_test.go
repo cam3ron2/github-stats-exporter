@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"maps"
 	"sort"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +18,7 @@ type fakeRedisClient struct {
 	hashes      map[string]map[string]string
 	sets        map[string]map[string]struct{}
 	stringLocks map[string]string
+	zsets       map[string]map[string]float64
 	expiresAt   map[string]time.Time
 }
 
@@ -25,6 +28,7 @@ func newFakeRedisClient(now time.Time) *fakeRedisClient {
 		hashes:      make(map[string]map[string]string),
 		sets:        make(map[string]map[string]struct{}),
 		stringLocks: make(map[string]string),
+		zsets:       make(map[string]map[string]float64),
 		expiresAt:   make(map[string]time.Time),
 	}
 }
@@ -109,6 +113,84 @@ func (c *fakeRedisClient) SetNX(_ context.Context, key string, value any, expira
 	return redis.NewBoolResult(true, nil)
 }
 
+func (c *fakeRedisClient) Incr(_ context.Context, key string) *redis.IntCmd {
+	c.purgeIfExpired(key)
+	current := int64(0)
+	if raw, exists := c.stringLocks[key]; exists {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return redis.NewIntResult(0, err)
+		}
+		current = parsed
+	}
+	current++
+	c.stringLocks[key] = strconv.FormatInt(current, 10)
+	return redis.NewIntResult(current, nil)
+}
+
+func (c *fakeRedisClient) Get(_ context.Context, key string) *redis.StringCmd {
+	c.purgeIfExpired(key)
+	value, exists := c.stringLocks[key]
+	if !exists {
+		return redis.NewStringResult("", redis.Nil)
+	}
+	return redis.NewStringResult(value, nil)
+}
+
+func (c *fakeRedisClient) ZAdd(_ context.Context, key string, members ...redis.Z) *redis.IntCmd {
+	c.purgeIfExpired(key)
+	if _, exists := c.zsets[key]; !exists {
+		c.zsets[key] = make(map[string]float64)
+	}
+
+	added := int64(0)
+	for _, member := range members {
+		memberKey := fmt.Sprint(member.Member)
+		if _, exists := c.zsets[key][memberKey]; !exists {
+			added++
+		}
+		c.zsets[key][memberKey] = member.Score
+	}
+
+	return redis.NewIntResult(added, nil)
+}
+
+func (c *fakeRedisClient) ZRangeByScoreWithScores(
+	_ context.Context,
+	key string,
+	opt *redis.ZRangeBy,
+) *redis.ZSliceCmd {
+	c.purgeIfExpired(key)
+	set := c.zsets[key]
+	if len(set) == 0 {
+		return redis.NewZSliceCmdResult(nil, nil)
+	}
+
+	min, minExclusive, err := parseRangeBoundary(opt.Min)
+	if err != nil {
+		return redis.NewZSliceCmdResult(nil, err)
+	}
+	max, maxExclusive, err := parseRangeBoundary(opt.Max)
+	if err != nil {
+		return redis.NewZSliceCmdResult(nil, err)
+	}
+
+	items := make([]redis.Z, 0, len(set))
+	for member, score := range set {
+		if !inScoreRange(score, min, minExclusive, max, maxExclusive) {
+			continue
+		}
+		items = append(items, redis.Z{Member: member, Score: score})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Score == items[j].Score {
+			return fmt.Sprint(items[i].Member) < fmt.Sprint(items[j].Member)
+		}
+		return items[i].Score < items[j].Score
+	})
+	return redis.NewZSliceCmdResult(items, nil)
+}
+
 func (c *fakeRedisClient) SMembers(_ context.Context, key string) *redis.StringSliceCmd {
 	c.purgeIfExpired(key)
 	members := make([]string, 0, len(c.sets[key]))
@@ -166,6 +248,9 @@ func (c *fakeRedisClient) keyExists(key string) bool {
 	if _, exists := c.stringLocks[key]; exists {
 		return true
 	}
+	if _, exists := c.zsets[key]; exists {
+		return true
+	}
 	return false
 }
 
@@ -179,12 +264,50 @@ func (c *fakeRedisClient) purgeIfExpired(key string) {
 	delete(c.hashes, key)
 	delete(c.sets, key)
 	delete(c.stringLocks, key)
+	delete(c.zsets, key)
 }
 
 func (c *fakeRedisClient) purgeAllExpired() {
 	for key := range c.expiresAt {
 		c.purgeIfExpired(key)
 	}
+}
+
+func parseRangeBoundary(raw string) (float64, bool, error) {
+	if raw == "" || raw == "-inf" {
+		return -1 << 62, false, nil
+	}
+	if raw == "+inf" {
+		return 1 << 62, false, nil
+	}
+
+	exclusive := strings.HasPrefix(raw, "(")
+	cleaned := strings.TrimPrefix(raw, "(")
+	value, err := strconv.ParseFloat(cleaned, 64)
+	if err != nil {
+		return 0, false, err
+	}
+	return value, exclusive, nil
+}
+
+func inScoreRange(score float64, min float64, minExclusive bool, max float64, maxExclusive bool) bool {
+	if minExclusive {
+		if score <= min {
+			return false
+		}
+	} else if score < min {
+		return false
+	}
+
+	if maxExclusive {
+		if score >= max {
+			return false
+		}
+	} else if score > max {
+		return false
+	}
+
+	return true
 }
 
 func newRedisStoreForTest(t *testing.T, now time.Time, retention time.Duration, maxSeries int) (*RedisStore, *fakeRedisClient) {
@@ -402,5 +525,124 @@ func TestRedisStoreSnapshotAndGC(t *testing.T) {
 	}
 	if indexCount != 0 {
 		t.Fatalf("index member count = %d, want 0", indexCount)
+	}
+}
+
+func TestRedisStoreSnapshotDelta(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1739836800, 0)
+	store, _ := newRedisStoreForTest(t, now, 24*time.Hour, 100)
+
+	err := store.UpsertMetric(RoleLeader, SourceLeaderScrape, MetricPoint{
+		Name:      "gh_activity_commits_24h",
+		Labels:    map[string]string{"org": "org-a", "repo": "repo-a", "user": "alice"},
+		Value:     1,
+		UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("UpsertMetric(alice) unexpected error: %v", err)
+	}
+
+	delta, err := store.SnapshotDelta(0)
+	if err != nil {
+		t.Fatalf("SnapshotDelta(first) unexpected error: %v", err)
+	}
+	if len(delta.Events) != 1 {
+		t.Fatalf("first delta events len = %d, want 1", len(delta.Events))
+	}
+	if delta.Events[0].Deleted {
+		t.Fatalf("first delta event is delete, want upsert")
+	}
+	if delta.Events[0].Point.Value != 1 {
+		t.Fatalf("first delta value = %v, want 1", delta.Events[0].Point.Value)
+	}
+	if delta.NextCursor == 0 {
+		t.Fatalf("first delta cursor = 0, want > 0")
+	}
+
+	cursor := delta.NextCursor
+	err = store.UpsertMetric(RoleLeader, SourceLeaderScrape, MetricPoint{
+		Name:      "gh_activity_commits_24h",
+		Labels:    map[string]string{"org": "org-a", "repo": "repo-a", "user": "alice"},
+		Value:     2,
+		UpdatedAt: now.Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("UpsertMetric(alice-update) unexpected error: %v", err)
+	}
+	err = store.UpsertMetric(RoleLeader, SourceLeaderScrape, MetricPoint{
+		Name:      "gh_activity_commits_24h",
+		Labels:    map[string]string{"org": "org-a", "repo": "repo-a", "user": "bob"},
+		Value:     3,
+		UpdatedAt: now.Add(2 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("UpsertMetric(bob) unexpected error: %v", err)
+	}
+
+	delta, err = store.SnapshotDelta(cursor)
+	if err != nil {
+		t.Fatalf("SnapshotDelta(second) unexpected error: %v", err)
+	}
+	if len(delta.Events) != 2 {
+		t.Fatalf("second delta events len = %d, want 2", len(delta.Events))
+	}
+
+	found := map[string]float64{}
+	for _, event := range delta.Events {
+		if event.Deleted {
+			t.Fatalf("unexpected delete event: %+v", event)
+		}
+		found[event.Point.Labels["user"]] = event.Point.Value
+	}
+	if found["alice"] != 2 {
+		t.Fatalf("alice updated value = %v, want 2", found["alice"])
+	}
+	if found["bob"] != 3 {
+		t.Fatalf("bob value = %v, want 3", found["bob"])
+	}
+}
+
+func TestRedisStoreSnapshotDeltaDeleteEvent(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1739836800, 0)
+	store, client := newRedisStoreForTest(t, now, time.Hour, 100)
+
+	point := MetricPoint{
+		Name:      "gh_activity_commits_24h",
+		Labels:    map[string]string{"org": "org-a", "repo": "repo-a", "user": "alice"},
+		Value:     1,
+		UpdatedAt: now,
+	}
+	err := store.UpsertMetric(RoleLeader, SourceLeaderScrape, point)
+	if err != nil {
+		t.Fatalf("UpsertMetric() unexpected error: %v", err)
+	}
+
+	cursor, err := store.SnapshotCursor()
+	if err != nil {
+		t.Fatalf("SnapshotCursor() unexpected error: %v", err)
+	}
+	if cursor == 0 {
+		t.Fatalf("SnapshotCursor() = 0, want > 0")
+	}
+
+	client.Advance(2 * time.Hour)
+	store.GC(now.Add(2 * time.Hour))
+
+	delta, err := store.SnapshotDelta(cursor)
+	if err != nil {
+		t.Fatalf("SnapshotDelta(delete) unexpected error: %v", err)
+	}
+	if len(delta.Events) != 1 {
+		t.Fatalf("delete delta events len = %d, want 1", len(delta.Events))
+	}
+	if !delta.Events[0].Deleted {
+		t.Fatalf("delete delta event Deleted = false, want true")
+	}
+	if delta.Events[0].SeriesID != hashSeriesID(metricKey(point.Name, point.Labels)) {
+		t.Fatalf("delete series id = %q, want %q", delta.Events[0].SeriesID, hashSeriesID(metricKey(point.Name, point.Labels)))
 	}
 }

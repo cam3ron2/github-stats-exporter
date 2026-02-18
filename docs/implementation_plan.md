@@ -222,6 +222,7 @@ Fallback policy for repos affected by GitHub's large-repo LOC limitation (common
 - `gh_exporter_metrics_cache_refresh_duration_seconds`
 - `gh_exporter_metrics_series_loaded{metric}`
 - `gh_exporter_dependency_health{dependency}` (`1` healthy, `0` unhealthy)
+- `gh_app_rate_limit_remaining{org,installation_id}`
 
 ## 5. Scraping and Controller Design
 

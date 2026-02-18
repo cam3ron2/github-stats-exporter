@@ -39,6 +39,9 @@
 - `gh_exporter_backfill_enqueues_dropped_total{org,reason}`
 - `gh_exporter_backfill_jobs_processed_total{org,repo,result}`
 - `gh_exporter_store_write_total{source,result}`
+- `gh_exporter_github_rate_limit_remaining{org,installation_id}`
+- `gh_exporter_github_rate_limit_reset_unixtime{org,installation_id}`
+- `gh_exporter_github_secondary_limit_hits_total{org}`
 - `gh_exporter_dependency_health{dependency}`
 - `/healthz` JSON mode + component statuses
 

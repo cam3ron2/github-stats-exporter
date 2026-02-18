@@ -3,11 +3,21 @@ package telemetry
 import (
 	"context"
 	"strings"
+	"sync/atomic"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
+)
+
+var globalTraceMode atomic.Value
+
+const (
+	traceModeOff      = "off"
+	traceModeErrors   = "errors"
+	traceModeSampled  = "sampled"
+	traceModeDetailed = "detailed"
 )
 
 // Config configures OpenTelemetry tracing setup.
@@ -31,7 +41,13 @@ func Setup(cfg Config) (Runtime, error) {
 		serviceName = "github-stats"
 	}
 
-	sampler := samplerForMode(cfg.TraceMode, cfg.TraceSampleRatio)
+	effectiveTraceMode := cfg.TraceMode
+	if !cfg.Enabled {
+		effectiveTraceMode = traceModeOff
+	}
+	setTraceMode(effectiveTraceMode)
+
+	sampler := samplerForMode(effectiveTraceMode, cfg.TraceSampleRatio)
 	if !cfg.Enabled {
 		sampler = sdktrace.NeverSample()
 	}
@@ -59,20 +75,57 @@ func Setup(cfg Config) (Runtime, error) {
 func samplerForMode(mode string, ratio float64) sdktrace.Sampler {
 	clampedRatio := clampRatio(ratio)
 
-	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "off":
+	switch normalizeTraceMode(mode) {
+	case traceModeOff:
 		return sdktrace.NeverSample()
-	case "detailed":
+	case traceModeDetailed:
 		return sdktrace.AlwaysSample()
-	case "errors":
+	case traceModeErrors:
 		if clampedRatio <= 0 {
 			clampedRatio = 0.01
 		}
 		return sdktrace.ParentBased(sdktrace.TraceIDRatioBased(clampedRatio))
-	case "sampled", "":
+	case traceModeSampled, "":
 		return sdktrace.ParentBased(sdktrace.TraceIDRatioBased(clampedRatio))
 	default:
 		return sdktrace.ParentBased(sdktrace.TraceIDRatioBased(clampedRatio))
+	}
+}
+
+// TraceMode reports the configured global trace mode.
+func TraceMode() string {
+	value := globalTraceMode.Load()
+	if value == nil {
+		return traceModeOff
+	}
+	mode, _ := value.(string)
+	if mode == "" {
+		return traceModeOff
+	}
+	return mode
+}
+
+// ShouldTraceDependencies reports if detailed dependency spans should be emitted.
+func ShouldTraceDependencies() bool {
+	return TraceMode() == traceModeDetailed
+}
+
+func setTraceMode(mode string) {
+	globalTraceMode.Store(normalizeTraceMode(mode))
+}
+
+func normalizeTraceMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case traceModeOff:
+		return traceModeOff
+	case traceModeErrors:
+		return traceModeErrors
+	case traceModeSampled, "":
+		return traceModeSampled
+	case traceModeDetailed:
+		return traceModeDetailed
+	default:
+		return traceModeSampled
 	}
 }
 
