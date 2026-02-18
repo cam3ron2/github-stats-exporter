@@ -49,8 +49,7 @@ repos:
         args:
           - -race
           - -v
-          - -timeout
-          - 45s
+          - -timeout=45s
       - id: go-vet-mod
   - repo: https://github.com/golangci/golangci-lint
     rev: v2.10.1

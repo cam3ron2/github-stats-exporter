@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 )
 
 type fakeRedisClient struct {
+	mu          sync.Mutex
 	now         time.Time
 	hashes      map[string]map[string]string
 	sets        map[string]map[string]struct{}
@@ -37,24 +39,36 @@ func newFakeRedisClient(now time.Time) *fakeRedisClient {
 }
 
 func (c *fakeRedisClient) Advance(duration time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	c.now = c.now.Add(duration)
-	c.purgeAllExpired()
+	c.purgeAllExpiredLocked()
 }
 
 func (c *fakeRedisClient) SIsMember(_ context.Context, key string, member any) *redis.BoolCmd {
-	c.purgeIfExpired(key)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.purgeIfExpiredLocked(key)
 	set := c.sets[key]
 	_, ok := set[fmt.Sprint(member)]
 	return redis.NewBoolResult(ok, nil)
 }
 
 func (c *fakeRedisClient) SCard(_ context.Context, key string) *redis.IntCmd {
-	c.purgeIfExpired(key)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.purgeIfExpiredLocked(key)
 	return redis.NewIntResult(int64(len(c.sets[key])), nil)
 }
 
 func (c *fakeRedisClient) HSet(_ context.Context, key string, values ...any) *redis.IntCmd {
-	c.purgeIfExpired(key)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.purgeIfExpiredLocked(key)
 	if len(values) != 1 {
 		return redis.NewIntResult(0, fmt.Errorf("unsupported HSet argument format"))
 	}
@@ -78,7 +92,10 @@ func (c *fakeRedisClient) HSet(_ context.Context, key string, values ...any) *re
 }
 
 func (c *fakeRedisClient) SAdd(_ context.Context, key string, members ...any) *redis.IntCmd {
-	c.purgeIfExpired(key)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.purgeIfExpiredLocked(key)
 	if _, exists := c.sets[key]; !exists {
 		c.sets[key] = make(map[string]struct{})
 	}
@@ -96,7 +113,10 @@ func (c *fakeRedisClient) SAdd(_ context.Context, key string, members ...any) *r
 }
 
 func (c *fakeRedisClient) ExpireAt(_ context.Context, key string, tm time.Time) *redis.BoolCmd {
-	if !c.keyExists(key) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.keyExistsLocked(key) {
 		return redis.NewBoolResult(false, nil)
 	}
 	c.expiresAt[key] = tm
@@ -104,7 +124,10 @@ func (c *fakeRedisClient) ExpireAt(_ context.Context, key string, tm time.Time) 
 }
 
 func (c *fakeRedisClient) SetNX(_ context.Context, key string, value any, expiration time.Duration) *redis.BoolCmd {
-	c.purgeIfExpired(key)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.purgeIfExpiredLocked(key)
 	if _, exists := c.stringLocks[key]; exists {
 		return redis.NewBoolResult(false, nil)
 	}
@@ -117,7 +140,10 @@ func (c *fakeRedisClient) SetNX(_ context.Context, key string, value any, expira
 }
 
 func (c *fakeRedisClient) Incr(_ context.Context, key string) *redis.IntCmd {
-	c.purgeIfExpired(key)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.purgeIfExpiredLocked(key)
 	current := int64(0)
 	if raw, exists := c.stringLocks[key]; exists {
 		parsed, err := strconv.ParseInt(raw, 10, 64)
@@ -132,7 +158,10 @@ func (c *fakeRedisClient) Incr(_ context.Context, key string) *redis.IntCmd {
 }
 
 func (c *fakeRedisClient) Get(_ context.Context, key string) *redis.StringCmd {
-	c.purgeIfExpired(key)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.purgeIfExpiredLocked(key)
 	value, exists := c.stringLocks[key]
 	if !exists {
 		return redis.NewStringResult("", redis.Nil)
@@ -141,7 +170,10 @@ func (c *fakeRedisClient) Get(_ context.Context, key string) *redis.StringCmd {
 }
 
 func (c *fakeRedisClient) ZAdd(_ context.Context, key string, members ...redis.Z) *redis.IntCmd {
-	c.purgeIfExpired(key)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.purgeIfExpiredLocked(key)
 	if _, exists := c.zsets[key]; !exists {
 		c.zsets[key] = make(map[string]float64)
 	}
@@ -163,7 +195,10 @@ func (c *fakeRedisClient) ZRangeByScoreWithScores(
 	key string,
 	opt *redis.ZRangeBy,
 ) *redis.ZSliceCmd {
-	c.purgeIfExpired(key)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.purgeIfExpiredLocked(key)
 	set := c.zsets[key]
 	if len(set) == 0 {
 		return redis.NewZSliceCmdResult(nil, nil)
@@ -195,7 +230,10 @@ func (c *fakeRedisClient) ZRangeByScoreWithScores(
 }
 
 func (c *fakeRedisClient) SMembers(_ context.Context, key string) *redis.StringSliceCmd {
-	c.purgeIfExpired(key)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.purgeIfExpiredLocked(key)
 	members := make([]string, 0, len(c.sets[key]))
 	for member := range c.sets[key] {
 		members = append(members, member)
@@ -205,18 +243,24 @@ func (c *fakeRedisClient) SMembers(_ context.Context, key string) *redis.StringS
 }
 
 func (c *fakeRedisClient) HGetAll(_ context.Context, key string) *redis.MapStringStringCmd {
-	c.purgeIfExpired(key)
-	if !c.keyExists(key) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.purgeIfExpiredLocked(key)
+	if !c.keyExistsLocked(key) {
 		return redis.NewMapStringStringResult(map[string]string{}, nil)
 	}
 	return redis.NewMapStringStringResult(maps.Clone(c.hashes[key]), nil)
 }
 
 func (c *fakeRedisClient) Exists(_ context.Context, keys ...string) *redis.IntCmd {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	exists := int64(0)
 	for _, key := range keys {
-		c.purgeIfExpired(key)
-		if c.keyExists(key) {
+		c.purgeIfExpiredLocked(key)
+		if c.keyExistsLocked(key) {
 			exists++
 		}
 	}
@@ -224,7 +268,10 @@ func (c *fakeRedisClient) Exists(_ context.Context, keys ...string) *redis.IntCm
 }
 
 func (c *fakeRedisClient) SRem(_ context.Context, key string, members ...any) *redis.IntCmd {
-	c.purgeIfExpired(key)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.purgeIfExpiredLocked(key)
 	set := c.sets[key]
 	removed := int64(0)
 	for _, member := range members {
@@ -242,6 +289,13 @@ func (c *fakeRedisClient) SRem(_ context.Context, key string, members ...any) *r
 }
 
 func (c *fakeRedisClient) keyExists(key string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.keyExistsLocked(key)
+}
+
+func (c *fakeRedisClient) keyExistsLocked(key string) bool {
 	if _, exists := c.hashes[key]; exists {
 		return true
 	}
@@ -258,6 +312,13 @@ func (c *fakeRedisClient) keyExists(key string) bool {
 }
 
 func (c *fakeRedisClient) purgeIfExpired(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.purgeIfExpiredLocked(key)
+}
+
+func (c *fakeRedisClient) purgeIfExpiredLocked(key string) {
 	expiry, ok := c.expiresAt[key]
 	if !ok || c.now.Before(expiry) {
 		return
@@ -271,8 +332,15 @@ func (c *fakeRedisClient) purgeIfExpired(key string) {
 }
 
 func (c *fakeRedisClient) purgeAllExpired() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.purgeAllExpiredLocked()
+}
+
+func (c *fakeRedisClient) purgeAllExpiredLocked() {
 	for key := range c.expiresAt {
-		c.purgeIfExpired(key)
+		c.purgeIfExpiredLocked(key)
 	}
 }
 
