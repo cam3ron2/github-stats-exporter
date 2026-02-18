@@ -27,6 +27,13 @@ echo "[check] key metrics on follower target"
 follower_metrics="$(curl -fsS http://localhost:8081/metrics)"
 echo "$follower_metrics" | grep -q 'gh_exporter_backfill_jobs_processed_total'
 
+echo "[check] business-series consistency across leader/follower targets"
+leader_activity="$(mktemp)"
+follower_activity="$(mktemp)"
+echo "$leader_metrics" | grep '^gh_activity_' | sort > "$leader_activity"
+echo "$follower_metrics" | grep '^gh_activity_' | sort > "$follower_activity"
+diff -u "$leader_activity" "$follower_activity" >/dev/null
+
 echo "[check] rabbitmq backfill queues"
 queues_json="$(curl -fsS -u githubstats:githubstats http://localhost:15672/api/queues/%2F)"
 echo "$queues_json" | grep -q '"name":"gh.backfill.jobs"'

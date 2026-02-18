@@ -15,6 +15,7 @@ The script validates:
 - leader endpoint is healthy and in leader role
 - follower endpoint is healthy and in follower role
 - key internal metrics exist on both scrape targets
+- business-series output is consistent between leader/follower targets
 - RabbitMQ backfill queues exist
 
 ## 2. Export-path load benchmark
