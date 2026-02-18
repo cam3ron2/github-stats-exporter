@@ -2,7 +2,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: github-stats
+  name: github-stats-exporter
 spec:
   replicas: 2
 ---

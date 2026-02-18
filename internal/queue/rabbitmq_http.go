@@ -532,7 +532,7 @@ func (b *RabbitMQHTTPBroker) doJSON(ctx context.Context, method, endpoint string
 	if parsed, err := url.Parse(endpoint); err == nil && parsed.Path != "" {
 		endpointPath = parsed.Path
 	}
-	ctx, span := otel.Tracer("github-stats/internal/queue").Start(
+	ctx, span := otel.Tracer("github-stats-exporter/internal/queue").Start(
 		ctx,
 		"rabbitmq.http.request",
 		trace.WithAttributes(

@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/cam3ron2/github-stats/internal/telemetry"
+	"github.com/cam3ron2/github-stats-exporter/internal/telemetry"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -62,7 +62,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, CallMetadata, error) {
 	ctx := req.Context()
 	var span trace.Span
 	if telemetry.ShouldTraceDependencies() {
-		ctx, span = otel.Tracer("github-stats/internal/githubapi").Start(
+		ctx, span = otel.Tracer("github-stats-exporter/internal/githubapi").Start(
 			ctx,
 			"githubapi.client.do",
 			trace.WithAttributes(

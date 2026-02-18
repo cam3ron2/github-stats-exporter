@@ -2,7 +2,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: github-stats-config
+  name: github-stats-exporter-config
 data:
   config.yaml: |
     server:
@@ -10,11 +10,11 @@ data:
       log_level: "debug"
     metrics:
       topology: "single_service_target"
-      scrape_service_dns: "github-stats-metrics.github-stats.svc.cluster.local:8080"
+      scrape_service_dns: "github-stats-exporter-metrics.github-stats-exporter.svc.cluster.local:8080"
     leader_election:
       enabled: true
-      namespace: "github-stats"
-      lease_name: "github-stats-leader"
+      namespace: "github-stats-exporter"
+      lease_name: "github-stats-exporter-leader"
       lease_duration: "30s"
       renew_deadline: "20s"
       retry_period: "5s"
@@ -27,7 +27,7 @@ data:
         - org: "org-a"
           app_id: 111111
           installation_id: 222222
-          private_key_path: "/etc/github-stats/keys/org-a.pem"
+          private_key_path: "/etc/github-stats-exporter/keys/org-a.pem"
           scrape_interval: "10m"
           repo_allowlist: ["*"]
           per_org_concurrency: 4
@@ -57,14 +57,14 @@ data:
       dedup_ttl: "12h"
       max_enqueues_per_org_per_minute: 100
     amqp:
-      url: "amqp://githubstats:githubstats@rabbitmq.github-stats.svc.cluster.local:5672/"
+      url: "amqp://githubstats:githubstats@rabbitmq.github-stats-exporter.svc.cluster.local:5672/"
       exchange: "gh.backfill"
       queue: "gh.backfill.jobs"
       dlq: "gh.backfill.dlq"
     store:
       backend: "redis"
       redis_mode: "standalone"
-      redis_addr: "redis.github-stats.svc.cluster.local:6379"
+      redis_addr: "redis.github-stats-exporter.svc.cluster.local:6379"
       redis_master_set: "mymaster"
       redis_sentinel_addrs: []
       redis_password: ""

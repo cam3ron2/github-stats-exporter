@@ -1,10 +1,10 @@
 ---
 services:
-  github-stats:
+  github-stats-exporter:
     build:
       context: .
       dockerfile: Dockerfile
-    image: github-stats:dev
+    image: github-stats-exporter:dev
     command: ["--config=/app/config/local.yaml"]
     environment:
       GITHUB_STATS_INITIAL_ROLE: "leader"
@@ -24,11 +24,11 @@ services:
       rabbitmq:
         condition: service_healthy
     restart: unless-stopped
-  github-stats-follower:
+  github-stats-exporter-follower:
     build:
       context: .
       dockerfile: Dockerfile
-    image: github-stats:dev
+    image: github-stats-exporter:dev
     command: ["--config=/app/config/local.yaml"]
     environment:
       GITHUB_STATS_INITIAL_ROLE: "follower"
@@ -47,7 +47,7 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
-      github-stats:
+      github-stats-exporter:
         condition: service_healthy
     restart: unless-stopped
   redis:

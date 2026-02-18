@@ -11,9 +11,9 @@ ifneq (,$(wildcard ./local.env))
   export
 endif
 
-BINARY_NAME := github-stats
-CMD_SOURCE  := ./cmd/github-stats
-DOCKER_TAG  := github-stats
+BINARY_NAME := github-stats-exporter
+CMD_SOURCE  := ./cmd/github-stats-exporter
+DOCKER_TAG  := github-stats-exporter
 
 ifndef NOCOLOR
   GREEN  := $(shell tput -Txterm setaf 2)

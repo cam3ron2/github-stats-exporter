@@ -7,8 +7,8 @@ metrics:
   scrape_service_dns: "localhost:8080"
 leader_election:
   enabled: false
-  namespace: "github-stats"
-  lease_name: "github-stats-leader"
+  namespace: "github-stats-exporter"
+  lease_name: "github-stats-exporter-leader"
   lease_duration: "30s"
   renew_deadline: "20s"
   retry_period: "5s"

@@ -133,7 +133,7 @@ func TestKubernetesLeaseElectorTryAcquireOrRenew(t *testing.T) {
 
 			elector, err := NewKubernetesLeaseElector(KubernetesLeaseConfig{
 				APIBaseURL:    "https://kubernetes.default.svc",
-				Namespace:     "github-stats",
+				Namespace:     "github-stats-exporter",
 				LeaseName:     "leader",
 				Identity:      "instance-a",
 				BearerToken:   "token",

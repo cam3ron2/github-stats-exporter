@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"sort"
 
-	"github.com/cam3ron2/github-stats/internal/store"
+	"github.com/cam3ron2/github-stats-exporter/internal/store"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )

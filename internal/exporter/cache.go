@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cam3ron2/github-stats/internal/store"
+	"github.com/cam3ron2/github-stats-exporter/internal/store"
 )
 
 const (

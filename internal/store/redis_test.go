@@ -396,7 +396,7 @@ func newRedisStoreForTestWithShards(
 
 	client := newFakeRedisClient(now)
 	store := newRedisStoreFromCommander(client, nil, RedisStoreConfig{
-		Namespace:   "github-stats-test",
+		Namespace:   "github-stats-exporter-test",
 		Retention:   retention,
 		MaxSeries:   maxSeries,
 		IndexShards: indexShards,
@@ -828,7 +828,7 @@ func TestRedisStoreUsesShardedIndexes(t *testing.T) {
 
 	shardedKeys := 0
 	for key := range client.sets {
-		if strings.HasPrefix(key, "github-stats-test:metrics:index:") {
+		if strings.HasPrefix(key, "github-stats-exporter-test:metrics:index:") {
 			shardedKeys++
 		}
 	}

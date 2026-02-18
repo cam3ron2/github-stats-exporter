@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cam3ron2/github-stats/internal/config"
-	"github.com/cam3ron2/github-stats/internal/githubapi"
+	"github.com/cam3ron2/github-stats-exporter/internal/config"
+	"github.com/cam3ron2/github-stats-exporter/internal/githubapi"
 )
 
 // NewOrgScraperFromConfig builds a GitHubOrgScraper using per-org GitHub App credentials from config.

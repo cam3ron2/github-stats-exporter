@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/cam3ron2/github-stats/internal/telemetry"
+	"github.com/cam3ron2/github-stats-exporter/internal/telemetry"
 	"github.com/go-chi/chi/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -36,7 +36,7 @@ func wrapHTTPHandler(traceMode, route string, handler http.Handler) http.Handler
 		operation = "handler"
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx, span := otel.Tracer("github-stats/internal/app").Start(
+		ctx, span := otel.Tracer("github-stats-exporter/internal/app").Start(
 			r.Context(),
 			"http.server."+operation,
 			trace.WithAttributes(

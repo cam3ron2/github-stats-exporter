@@ -14,18 +14,18 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cam3ron2/github-stats/internal/app"
-	"github.com/cam3ron2/github-stats/internal/config"
-	"github.com/cam3ron2/github-stats/internal/leader"
-	"github.com/cam3ron2/github-stats/internal/scrape"
-	"github.com/cam3ron2/github-stats/internal/telemetry"
+	"github.com/cam3ron2/github-stats-exporter/internal/app"
+	"github.com/cam3ron2/github-stats-exporter/internal/config"
+	"github.com/cam3ron2/github-stats-exporter/internal/leader"
+	"github.com/cam3ron2/github-stats-exporter/internal/scrape"
+	"github.com/cam3ron2/github-stats-exporter/internal/telemetry"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
 
 func main() {
 	if err := run(); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "github-stats: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "github-stats-exporter: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -41,7 +41,7 @@ func run() error {
 	}
 	defer func() {
 		if closeErr := configFile.Close(); closeErr != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "github-stats: config file close failed: %v\n", closeErr)
+			_, _ = fmt.Fprintf(os.Stderr, "github-stats-exporter: config file close failed: %v\n", closeErr)
 		}
 	}()
 
@@ -58,13 +58,13 @@ func run() error {
 	}
 	defer func() {
 		if syncErr := logger.Sync(); syncErr != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "github-stats: logger sync failed: %v\n", syncErr)
+			_, _ = fmt.Fprintf(os.Stderr, "github-stats-exporter: logger sync failed: %v\n", syncErr)
 		}
 	}()
 
 	telemetryRuntime, err := telemetry.Setup(telemetry.Config{
 		Enabled:          cfg.Telemetry.OTELEnabled,
-		ServiceName:      "github-stats",
+		ServiceName:      "github-stats-exporter",
 		OTLPEndpoint:     cfg.Telemetry.OTELExporterEndpoint,
 		TraceMode:        cfg.Telemetry.OTELTraceMode,
 		TraceSampleRatio: cfg.Telemetry.OTELTraceSampleRatio,
@@ -166,7 +166,7 @@ func buildElector(cfg *config.Config, logger *zap.Logger) (leader.Elector, error
 	if identity == "" {
 		hostname, hostErr := os.Hostname()
 		if hostErr != nil {
-			identity = fmt.Sprintf("github-stats-%d", time.Now().UnixNano())
+			identity = fmt.Sprintf("github-stats-exporter-%d", time.Now().UnixNano())
 		} else {
 			identity = hostname
 		}

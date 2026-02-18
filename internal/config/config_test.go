@@ -24,11 +24,11 @@ server:
   log_level: "info"
 metrics:
   topology: "single_service_target"
-  scrape_service_dns: "github-stats-metrics.github-stats.svc.cluster.local:8080"
+  scrape_service_dns: "github-stats-exporter-metrics.github-stats-exporter.svc.cluster.local:8080"
 leader_election:
   enabled: true
-  namespace: "github-stats"
-  lease_name: "github-stats-leader"
+  namespace: "github-stats-exporter"
+  lease_name: "github-stats-exporter-leader"
   lease_duration: "30s"
   renew_deadline: "20s"
   retry_period: "5s"
@@ -41,7 +41,7 @@ github:
     - org: "org-a"
       app_id: 111111
       installation_id: 222222
-      private_key_path: "/etc/github-stats/keys/org-a.pem"
+      private_key_path: "/etc/github-stats-exporter/keys/org-a.pem"
       scrape_interval: "5m"
       repo_allowlist: ["*"]
       per_org_concurrency: 8

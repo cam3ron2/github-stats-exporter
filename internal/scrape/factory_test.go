@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cam3ron2/github-stats/internal/config"
+	"github.com/cam3ron2/github-stats-exporter/internal/config"
 )
 
 func TestNewOrgScraperFromConfig(t *testing.T) {

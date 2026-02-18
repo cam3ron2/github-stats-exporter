@@ -50,7 +50,7 @@ func TestSetup(t *testing.T) {
 			name: "disabled_tracing_uses_drop_sampler",
 			config: Config{
 				Enabled:     false,
-				ServiceName: "github-stats",
+				ServiceName: "github-stats-exporter",
 				TraceMode:   "off",
 			},
 		},
@@ -58,7 +58,7 @@ func TestSetup(t *testing.T) {
 			name: "enabled_sampled_tracing",
 			config: Config{
 				Enabled:          true,
-				ServiceName:      "github-stats",
+				ServiceName:      "github-stats-exporter",
 				TraceMode:        "sampled",
 				TraceSampleRatio: 0.25,
 			},
@@ -198,7 +198,7 @@ func TestSetupBuildsOTLPExporterWhenEndpointConfigured(t *testing.T) {
 
 	runtime, err := Setup(Config{
 		Enabled:      true,
-		ServiceName:  "github-stats",
+		ServiceName:  "github-stats-exporter",
 		OTLPEndpoint: "otel-collector:4317",
 		TraceMode:    "sampled",
 	})

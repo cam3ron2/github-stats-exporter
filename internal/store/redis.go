@@ -66,7 +66,7 @@ func NewRedisStore(client redis.UniversalClient, cfg RedisStoreConfig) *RedisSto
 func newRedisStoreFromCommander(client redisCommander, closeFn func() error, cfg RedisStoreConfig) *RedisStore {
 	namespace := cfg.Namespace
 	if namespace == "" {
-		namespace = "github-stats"
+		namespace = "github-stats-exporter"
 	}
 	if closeFn == nil {
 		closeFn = func() error { return nil }
@@ -570,7 +570,7 @@ func (s *RedisStore) checkpointDataKey(org, repo string) string {
 }
 
 func startRedisSpan(operation string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
-	return otel.Tracer("github-stats/internal/store").Start(
+	return otel.Tracer("github-stats-exporter/internal/store").Start(
 		context.Background(),
 		"redis."+operation,
 		trace.WithAttributes(attrs...),

@@ -3,7 +3,7 @@ package scrape
 import (
 	"context"
 
-	"github.com/cam3ron2/github-stats/internal/config"
+	"github.com/cam3ron2/github-stats-exporter/internal/config"
 )
 
 // NoopOrgScraper is a placeholder scraper implementation for initial bootstrapping.

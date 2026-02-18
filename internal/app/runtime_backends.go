@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cam3ron2/github-stats/internal/backfill"
-	"github.com/cam3ron2/github-stats/internal/config"
-	queuepkg "github.com/cam3ron2/github-stats/internal/queue"
-	"github.com/cam3ron2/github-stats/internal/store"
+	"github.com/cam3ron2/github-stats-exporter/internal/backfill"
+	"github.com/cam3ron2/github-stats-exporter/internal/config"
+	queuepkg "github.com/cam3ron2/github-stats-exporter/internal/queue"
+	"github.com/cam3ron2/github-stats-exporter/internal/store"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 )

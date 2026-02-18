@@ -35,7 +35,7 @@ Benchmark file:
 
 Prometheus rule file:
 
-- `deploy/prometheus/github-stats-alert-rules.yaml`
+- `deploy/prometheus/github-stats-exporter-alert-rules.yaml`
 
 Implemented rules:
 

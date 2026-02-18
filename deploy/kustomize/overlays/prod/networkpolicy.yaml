@@ -2,25 +2,25 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: github-stats-default-deny
+  name: github-stats-exporter-default-deny
   labels:
     app.kubernetes.io/component: exporter
 spec:
   podSelector:
     matchLabels:
-      app: github-stats
+      app: github-stats-exporter
   policyTypes: ["Ingress", "Egress"]
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: github-stats-allow-required
+  name: github-stats-exporter-allow-required
   labels:
     app.kubernetes.io/component: exporter
 spec:
   podSelector:
     matchLabels:
-      app: github-stats
+      app: github-stats-exporter
   policyTypes: ["Ingress", "Egress"]
   ingress:
     - from:

@@ -2,7 +2,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: github-stats
+  name: github-stats-exporter
 spec:
   replicas: 5
 ---
@@ -16,6 +16,6 @@ spec:
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: github-stats
+  name: github-stats-exporter
 spec:
   minAvailable: 2

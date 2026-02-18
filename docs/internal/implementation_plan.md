@@ -48,7 +48,7 @@
 
 ### 2.2 Component layout
 
-- `cmd/github-stats/main.go`
+- `cmd/github-stats-exporter/main.go`
 - `internal/config` (YAML/env config parsing + validation)
 - `internal/leader` (Kubernetes Lease election)
 - `internal/controller` (org controller manager, goroutine lifecycle)
@@ -62,7 +62,7 @@
 
 ### 2.3 Prometheus scrape topology (one logical target with failover)
 
-- Use one ClusterIP service DNS target for scraping: `github-stats-metrics.github-stats.svc.cluster.local:8080`.
+- Use one ClusterIP service DNS target for scraping: `github-stats-exporter-metrics.github-stats-exporter.svc.cluster.local:8080`.
 - Do not use ServiceMonitor endpoint discovery for this job (that expands to pod targets and can duplicate samples).
 - Keep all replicas scrape-capable; kube-proxy load balancing plus shared Redis state provides transparent failover.
 - Add recording rules only for business aggregations, not for deduplication.
@@ -78,12 +78,12 @@ server:
 
 metrics:
   topology: "single_service_target"
-  scrape_service_dns: "github-stats-metrics.github-stats.svc.cluster.local:8080"
+  scrape_service_dns: "github-stats-exporter-metrics.github-stats-exporter.svc.cluster.local:8080"
 
 leader_election:
   enabled: true
-  namespace: "github-stats"
-  lease_name: "github-stats-leader"
+  namespace: "github-stats-exporter"
+  lease_name: "github-stats-exporter-leader"
   lease_duration: "30s"
   renew_deadline: "20s"
   retry_period: "5s"
@@ -97,14 +97,14 @@ github:
     - org: "org-a"
       app_id: 111111
       installation_id: 222222
-      private_key_path: "/etc/github-stats/keys/org-a.pem"
+      private_key_path: "/etc/github-stats-exporter/keys/org-a.pem"
       scrape_interval: "5m"
       repo_allowlist: ["*"]
       per_org_concurrency: 8
     - org: "org-b"
       app_id: 333333
       installation_id: 444444
-      private_key_path: "/etc/github-stats/keys/org-b.pem"
+      private_key_path: "/etc/github-stats-exporter/keys/org-b.pem"
       scrape_interval: "5m"
       repo_allowlist: ["*"]
       per_org_concurrency: 8
@@ -376,7 +376,7 @@ Fallback policy for repos affected by GitHub's large-repo LOC limitation (common
 
 ### 9.3 One-target metrics failover behavior
 
-- Prometheus scrapes one DNS target (`github-stats-metrics` service), not individual pods.
+- Prometheus scrapes one DNS target (`github-stats-exporter-metrics` service), not individual pods.
 - Any healthy replica can answer with equivalent metric content because all read from Redis-backed cache.
 - Pod churn does not duplicate time series because Prometheus has one logical target identity.
 
@@ -566,7 +566,7 @@ Base kustomization:
 ```yaml
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-namespace: github-stats
+namespace: github-stats-exporter
 resources:
   - namespace.yaml
   - serviceaccount.yaml
@@ -592,17 +592,17 @@ Base foundation resources:
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: github-stats
+  name: github-stats-exporter
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: github-stats
+  name: github-stats-exporter
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: github-stats-leader-election
+  name: github-stats-exporter-leader-election
 rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
@@ -611,19 +611,19 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: github-stats-leader-election
+  name: github-stats-exporter-leader-election
 subjects:
   - kind: ServiceAccount
-    name: github-stats
+    name: github-stats-exporter
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: github-stats-leader-election
+  name: github-stats-exporter-leader-election
 ---
 apiVersion: v1
 kind: Secret
 metadata:
-  name: github-stats-secrets
+  name: github-stats-exporter-secrets
 type: Opaque
 stringData:
   org-a.pem: |
@@ -642,29 +642,29 @@ Base app deployment and services:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: github-stats
+  name: github-stats-exporter
   labels:
-    app: github-stats
+    app: github-stats-exporter
 spec:
   replicas: 3
   selector:
     matchLabels:
-      app: github-stats
+      app: github-stats-exporter
   template:
     metadata:
       labels:
-        app: github-stats
+        app: github-stats-exporter
     spec:
-      serviceAccountName: github-stats
+      serviceAccountName: github-stats-exporter
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
         fsGroup: 65532
       containers:
-        - name: github-stats
-          image: ghcr.io/your-org/github-stats:latest
+        - name: github-stats-exporter
+          image: ghcr.io/your-org/github-stats-exporter:latest
           imagePullPolicy: IfNotPresent
-          args: ["--config=/etc/github-stats/config.yaml"]
+          args: ["--config=/etc/github-stats-exporter/config.yaml"]
           ports:
             - name: http
               containerPort: 8080
@@ -690,29 +690,29 @@ spec:
               memory: "2Gi"
           volumeMounts:
             - name: config
-              mountPath: /etc/github-stats/config.yaml
+              mountPath: /etc/github-stats-exporter/config.yaml
               subPath: config.yaml
               readOnly: true
             - name: keys
-              mountPath: /etc/github-stats/keys
+              mountPath: /etc/github-stats-exporter/keys
               readOnly: true
       volumes:
         - name: config
           configMap:
-            name: github-stats-config
+            name: github-stats-exporter-config
         - name: keys
           secret:
-            secretName: github-stats-secrets
+            secretName: github-stats-exporter-secrets
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: github-stats-http
+  name: github-stats-exporter-http
   labels:
-    app: github-stats
+    app: github-stats-exporter
 spec:
   selector:
-    app: github-stats
+    app: github-stats-exporter
   ports:
     - name: http
       port: 8080
@@ -721,12 +721,12 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: github-stats-metrics
+  name: github-stats-exporter-metrics
   labels:
-    app: github-stats
+    app: github-stats-exporter
 spec:
   selector:
-    app: github-stats
+    app: github-stats-exporter
   ports:
     - name: http
       port: 8080
@@ -735,12 +735,12 @@ spec:
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: github-stats
+  name: github-stats-exporter
 spec:
   minAvailable: 1
   selector:
     matchLabels:
-      app: github-stats
+      app: github-stats-exporter
 ```
 
 Base dependencies (Redis + RabbitMQ):
@@ -909,7 +909,7 @@ Base app config map:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: github-stats-config
+  name: github-stats-exporter-config
 data:
   config.yaml: |
     server:
@@ -917,11 +917,11 @@ data:
       log_level: "info"
     metrics:
       topology: "single_service_target"
-      scrape_service_dns: "github-stats-metrics.github-stats.svc.cluster.local:8080"
+      scrape_service_dns: "github-stats-exporter-metrics.github-stats-exporter.svc.cluster.local:8080"
     leader_election:
       enabled: true
-      namespace: "github-stats"
-      lease_name: "github-stats-leader"
+      namespace: "github-stats-exporter"
+      lease_name: "github-stats-exporter-leader"
       lease_duration: "30s"
       renew_deadline: "20s"
       retry_period: "5s"
@@ -934,14 +934,14 @@ data:
         - org: "org-a"
           app_id: 111111
           installation_id: 222222
-          private_key_path: "/etc/github-stats/keys/org-a.pem"
+          private_key_path: "/etc/github-stats-exporter/keys/org-a.pem"
           scrape_interval: "5m"
           repo_allowlist: ["*"]
           per_org_concurrency: 8
         - org: "org-b"
           app_id: 333333
           installation_id: 444444
-          private_key_path: "/etc/github-stats/keys/org-b.pem"
+          private_key_path: "/etc/github-stats-exporter/keys/org-b.pem"
           scrape_interval: "5m"
           repo_allowlist: ["*"]
           per_org_concurrency: 8
@@ -971,14 +971,14 @@ data:
       dedup_ttl: "12h"
       max_enqueues_per_org_per_minute: 200
     amqp:
-      url: "amqp://githubstats:githubstats@rabbitmq.github-stats.svc.cluster.local:5672/"
+      url: "amqp://githubstats:githubstats@rabbitmq.github-stats-exporter.svc.cluster.local:5672/"
       exchange: "gh.backfill"
       queue: "gh.backfill.jobs"
       dlq: "gh.backfill.dlq"
     store:
       backend: "redis"
       redis_mode: "standalone"
-      redis_addr: "redis.github-stats.svc.cluster.local:6379"
+      redis_addr: "redis.github-stats-exporter.svc.cluster.local:6379"
       redis_master_set: "mymaster"
       redis_sentinel_addrs: []
       redis_password: ""
@@ -1016,7 +1016,7 @@ patchesStrategicMerge:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: github-stats
+  name: github-stats-exporter
 spec:
   replicas: 2
 ---
@@ -1041,7 +1041,7 @@ spec:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: github-stats-config
+  name: github-stats-exporter-config
 data:
   config.yaml: |
     server:
@@ -1049,11 +1049,11 @@ data:
       log_level: "debug"
     metrics:
       topology: "single_service_target"
-      scrape_service_dns: "github-stats-metrics.github-stats.svc.cluster.local:8080"
+      scrape_service_dns: "github-stats-exporter-metrics.github-stats-exporter.svc.cluster.local:8080"
     leader_election:
       enabled: true
-      namespace: "github-stats"
-      lease_name: "github-stats-leader"
+      namespace: "github-stats-exporter"
+      lease_name: "github-stats-exporter-leader"
       lease_duration: "30s"
       renew_deadline: "20s"
       retry_period: "5s"
@@ -1066,7 +1066,7 @@ data:
         - org: "org-a"
           app_id: 111111
           installation_id: 222222
-          private_key_path: "/etc/github-stats/keys/org-a.pem"
+          private_key_path: "/etc/github-stats-exporter/keys/org-a.pem"
           scrape_interval: "10m"
           repo_allowlist: ["*"]
           per_org_concurrency: 4
@@ -1096,14 +1096,14 @@ data:
       dedup_ttl: "12h"
       max_enqueues_per_org_per_minute: 100
     amqp:
-      url: "amqp://githubstats:githubstats@rabbitmq.github-stats.svc.cluster.local:5672/"
+      url: "amqp://githubstats:githubstats@rabbitmq.github-stats-exporter.svc.cluster.local:5672/"
       exchange: "gh.backfill"
       queue: "gh.backfill.jobs"
       dlq: "gh.backfill.dlq"
     store:
       backend: "redis"
       redis_mode: "standalone"
-      redis_addr: "redis.github-stats.svc.cluster.local:6379"
+      redis_addr: "redis.github-stats-exporter.svc.cluster.local:6379"
       redis_master_set: "mymaster"
       redis_sentinel_addrs: []
       redis_password: ""
@@ -1145,7 +1145,7 @@ patchesStrategicMerge:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: github-stats
+  name: github-stats-exporter
 spec:
   replicas: 5
 ---
@@ -1159,7 +1159,7 @@ spec:
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: github-stats
+  name: github-stats-exporter
 spec:
   minAvailable: 2
 ```
@@ -1195,7 +1195,7 @@ spec:
             - |
               exec redis-server \
                 --appendonly yes \
-                --replicaof redis-0.redis.github-stats.svc.cluster.local 6379
+                --replicaof redis-0.redis.github-stats-exporter.svc.cluster.local 6379
           ports:
             - name: redis
               containerPort: 6379
@@ -1213,7 +1213,7 @@ spec:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: github-stats-config
+  name: github-stats-exporter-config
 data:
   config.yaml: |
     server:
@@ -1221,11 +1221,11 @@ data:
       log_level: "info"
     metrics:
       topology: "single_service_target"
-      scrape_service_dns: "github-stats-metrics.github-stats.svc.cluster.local:8080"
+      scrape_service_dns: "github-stats-exporter-metrics.github-stats-exporter.svc.cluster.local:8080"
     leader_election:
       enabled: true
-      namespace: "github-stats"
-      lease_name: "github-stats-leader"
+      namespace: "github-stats-exporter"
+      lease_name: "github-stats-exporter-leader"
       lease_duration: "30s"
       renew_deadline: "20s"
       retry_period: "5s"
@@ -1238,14 +1238,14 @@ data:
         - org: "org-a"
           app_id: 111111
           installation_id: 222222
-          private_key_path: "/etc/github-stats/keys/org-a.pem"
+          private_key_path: "/etc/github-stats-exporter/keys/org-a.pem"
           scrape_interval: "5m"
           repo_allowlist: ["*"]
           per_org_concurrency: 8
         - org: "org-b"
           app_id: 333333
           installation_id: 444444
-          private_key_path: "/etc/github-stats/keys/org-b.pem"
+          private_key_path: "/etc/github-stats-exporter/keys/org-b.pem"
           scrape_interval: "5m"
           repo_allowlist: ["*"]
           per_org_concurrency: 8
@@ -1275,7 +1275,7 @@ data:
       dedup_ttl: "12h"
       max_enqueues_per_org_per_minute: 200
     amqp:
-      url: "amqp://githubstats:githubstats@rabbitmq.github-stats.svc.cluster.local:5672/"
+      url: "amqp://githubstats:githubstats@rabbitmq.github-stats-exporter.svc.cluster.local:5672/"
       exchange: "gh.backfill"
       queue: "gh.backfill.jobs"
       dlq: "gh.backfill.dlq"
@@ -1285,7 +1285,7 @@ data:
       redis_addr: ""
       redis_master_set: "mymaster"
       redis_sentinel_addrs:
-        - "redis-sentinel.github-stats.svc.cluster.local:26379"
+        - "redis-sentinel.github-stats-exporter.svc.cluster.local:26379"
       redis_password: ""
       redis_db: 0
       retention: "30d"
@@ -1340,7 +1340,7 @@ spec:
             - |
               cat <<'EOF' > /tmp/sentinel.conf
               port 26379
-              sentinel monitor mymaster redis-0.redis.github-stats.svc.cluster.local 6379 2
+              sentinel monitor mymaster redis-0.redis.github-stats-exporter.svc.cluster.local 6379 2
               sentinel down-after-milliseconds mymaster 5000
               sentinel failover-timeout mymaster 60000
               sentinel parallel-syncs mymaster 1
@@ -1357,7 +1357,7 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: github-stats
+  name: github-stats-exporter
 spec:
   template:
     spec:
@@ -1368,7 +1368,7 @@ spec:
                 matchExpressions:
                   - key: app
                     operator: In
-                    values: ["github-stats"]
+                    values: ["github-stats-exporter"]
               topologyKey: kubernetes.io/hostname
       topologySpreadConstraints:
         - maxSkew: 1
@@ -1376,7 +1376,7 @@ spec:
           whenUnsatisfiable: ScheduleAnyway
           labelSelector:
             matchLabels:
-              app: github-stats
+              app: github-stats-exporter
 ```
 
 `overlays/prod/networkpolicy.yaml`:
@@ -1385,21 +1385,21 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: github-stats-default-deny
+  name: github-stats-exporter-default-deny
 spec:
   podSelector:
     matchLabels:
-      app: github-stats
+      app: github-stats-exporter
   policyTypes: ["Ingress", "Egress"]
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: github-stats-allow-required
+  name: github-stats-exporter-allow-required
 spec:
   podSelector:
     matchLabels:
-      app: github-stats
+      app: github-stats-exporter
   policyTypes: ["Ingress", "Egress"]
   ingress:
     - from:
@@ -1441,16 +1441,16 @@ Prometheus scrape config for one logical target with failover (recommended over 
 
 ```yaml
 scrape_configs:
-  - job_name: github-stats
+  - job_name: github-stats-exporter
     metrics_path: /metrics
     static_configs:
       - targets:
-          - github-stats-metrics.github-stats.svc.cluster.local:8080
+          - github-stats-exporter-metrics.github-stats-exporter.svc.cluster.local:8080
 ```
 
 Prometheus recording/alert rules:
 
-- `deploy/prometheus/github-stats-alert-rules.yaml`
+- `deploy/prometheus/github-stats-exporter-alert-rules.yaml`
 
 ## 16. Local Development Compose (App + Redis + RabbitMQ)
 
@@ -1458,8 +1458,8 @@ Prometheus recording/alert rules:
 version: "3.9"
 
 services:
-  github-stats:
-    image: ghcr.io/your-org/github-stats:dev
+  github-stats-exporter:
+    image: ghcr.io/your-org/github-stats-exporter:dev
     build:
       context: .
       dockerfile: Dockerfile
@@ -1529,7 +1529,7 @@ Create these issues once the repository is initialized. All are implementation-c
 1. Title: `Implement single-target Prometheus scrape topology with failover`
    - Priority: `P1`
    - Labels: `architecture`, `observability`, `metrics`
-   - Description: Implement and validate single logical scrape target via `github-stats-metrics` service DNS. Remove/avoid pod endpoint ServiceMonitor for this app.
+   - Description: Implement and validate single logical scrape target via `github-stats-exporter-metrics` service DNS. Remove/avoid pod endpoint ServiceMonitor for this app.
    - Acceptance criteria:
      - Prometheus scrapes one logical target.
      - Business metrics do not duplicate during normal operations or pod churn.

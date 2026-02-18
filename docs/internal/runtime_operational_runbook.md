@@ -47,13 +47,13 @@
 
 Alert and recording rule source:
 
-- `deploy/prometheus/github-stats-alert-rules.yaml`
+- `deploy/prometheus/github-stats-exporter-alert-rules.yaml`
 
 ## Quick Verification Commands (Compose)
 
 ```bash
 docker compose ps
-docker compose logs --tail=100 github-stats
+docker compose logs --tail=100 github-stats-exporter
 curl -s http://localhost:8080/metrics | rg 'gh_exporter_dependency_health|gh_exporter_store_write_total'
 ```
 

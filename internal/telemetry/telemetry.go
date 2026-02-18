@@ -51,7 +51,7 @@ type Runtime struct {
 func Setup(cfg Config) (Runtime, error) {
 	serviceName := strings.TrimSpace(cfg.ServiceName)
 	if serviceName == "" {
-		serviceName = "github-stats"
+		serviceName = "github-stats-exporter"
 	}
 
 	effectiveTraceMode := cfg.TraceMode

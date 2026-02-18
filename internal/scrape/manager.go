@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cam3ron2/github-stats/internal/config"
-	"github.com/cam3ron2/github-stats/internal/store"
+	"github.com/cam3ron2/github-stats-exporter/internal/config"
+	"github.com/cam3ron2/github-stats-exporter/internal/store"
 )
 
 // OrgResult is the scrape output for one organization.

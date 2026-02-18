@@ -2,13 +2,13 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: github-stats-http
+  name: github-stats-exporter-http
   labels:
-    app: github-stats
+    app: github-stats-exporter
     app.kubernetes.io/component: exporter
 spec:
   selector:
-    app: github-stats
+    app: github-stats-exporter
   ports:
     - name: http
       port: 8080

@@ -1,13 +1,13 @@
 ---
 version: 2
-project_name: github-stats
+project_name: github-stats-exporter-exporter
 before:
   hooks:
     - go mod download
 builds:
-  - id: github-stats
-    main: ./cmd/github-stats
-    binary: github-stats
+  - id: github-stats-exporter-exporter
+    main: ./cmd/github-stats-exporter-exporter
+    binary: github-stats-exporter-exporter
     env:
       - CGO_ENABLED=0
     goos:
@@ -22,9 +22,9 @@ builds:
     ldflags:
       - -s -w
 archives:
-  - id: github-stats
+  - id: github-stats-exporter-exporter
     builds:
-      - github-stats
+      - github-stats-exporter-exporter
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     format_overrides:
       - goos: windows

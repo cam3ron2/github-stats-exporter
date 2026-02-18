@@ -4,8 +4,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/cam3ron2/github-stats/internal/config"
-	"github.com/cam3ron2/github-stats/internal/leader"
+	"github.com/cam3ron2/github-stats-exporter/internal/config"
+	"github.com/cam3ron2/github-stats-exporter/internal/leader"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -61,7 +61,7 @@ func TestBuildElector(t *testing.T) {
 			cfg: &config.Config{
 				LeaderElection: config.LeaderElectionConfig{
 					Enabled:   true,
-					Namespace: "github-stats",
+					Namespace: "github-stats-exporter",
 					LeaseName: "leader",
 				},
 			},

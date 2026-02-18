@@ -2,31 +2,31 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: github-stats
+  name: github-stats-exporter
   labels:
-    app: github-stats
+    app: github-stats-exporter
     app.kubernetes.io/component: exporter
 spec:
   replicas: 3
   selector:
     matchLabels:
-      app: github-stats
+      app: github-stats-exporter
   template:
     metadata:
       labels:
-        app: github-stats
+        app: github-stats-exporter
         app.kubernetes.io/component: exporter
     spec:
-      serviceAccountName: github-stats
+      serviceAccountName: github-stats-exporter
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
         fsGroup: 10001
       containers:
-        - name: github-stats
-          image: ghcr.io/your-org/github-stats:latest
+        - name: github-stats-exporter
+          image: ghcr.io/your-org/github-stats-exporter:latest
           imagePullPolicy: IfNotPresent
-          args: ["--config=/etc/github-stats/config.yaml"]
+          args: ["--config=/etc/github-stats-exporter/config.yaml"]
           env:
             - name: GITHUB_STATS_INITIAL_ROLE
               value: "leader"
@@ -59,16 +59,16 @@ spec:
               drop: ["ALL"]
           volumeMounts:
             - name: config
-              mountPath: /etc/github-stats/config.yaml
+              mountPath: /etc/github-stats-exporter/config.yaml
               subPath: config.yaml
               readOnly: true
             - name: keys
-              mountPath: /etc/github-stats/keys
+              mountPath: /etc/github-stats-exporter/keys
               readOnly: true
       volumes:
         - name: config
           configMap:
-            name: github-stats-config
+            name: github-stats-exporter-config
         - name: keys
           secret:
-            secretName: github-stats-secrets
+            secretName: github-stats-exporter-secrets

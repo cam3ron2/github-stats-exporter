@@ -1,4 +1,4 @@
-module github.com/cam3ron2/github-stats
+module github.com/cam3ron2/github-stats-exporter
 
 go 1.25.0
 

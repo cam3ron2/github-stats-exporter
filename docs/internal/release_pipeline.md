@@ -7,7 +7,7 @@ multi-arch container images to GHCR.
 ### Trigger and flow
 
 1. Merge a PR into `main`.
-2. `/Users/cam/Documents/Repos/cam3ron2/github-stats/.github/workflows/release.yml`
+2. `/Users/cam/Documents/Repos/cam3ron2/github-stats-exporter/.github/workflows/release.yml`
    runs.
 3. `semantic-release` evaluates Conventional Commits since the previous tag,
    updates `CHANGELOG.md`, creates a SemVer tag (`vX.Y.Z`), and creates the
@@ -17,7 +17,7 @@ multi-arch container images to GHCR.
 5. Docker Buildx builds and pushes a multi-arch image for `linux/amd64` and
    `linux/arm64` to `ghcr.io/<owner>/<repo>`.
 6. The pipeline updates
-   `/Users/cam/Documents/Repos/cam3ron2/github-stats/deploy/kustomize/base/app-deployment.yaml`
+   `/Users/cam/Documents/Repos/cam3ron2/github-stats-exporter/deploy/kustomize/base/app-deployment.yaml`
    to the new release tag and commits that change back to `main` with
    `[skip ci]`.
 

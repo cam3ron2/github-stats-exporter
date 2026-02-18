@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cam3ron2/github-stats/internal/backfill"
-	"github.com/cam3ron2/github-stats/internal/config"
-	"github.com/cam3ron2/github-stats/internal/health"
-	"github.com/cam3ron2/github-stats/internal/scrape"
-	"github.com/cam3ron2/github-stats/internal/store"
+	"github.com/cam3ron2/github-stats-exporter/internal/backfill"
+	"github.com/cam3ron2/github-stats-exporter/internal/config"
+	"github.com/cam3ron2/github-stats-exporter/internal/health"
+	"github.com/cam3ron2/github-stats-exporter/internal/scrape"
+	"github.com/cam3ron2/github-stats-exporter/internal/store"
 )
 
 type fakeOrgScraper struct {

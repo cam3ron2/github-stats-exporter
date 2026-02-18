@@ -2,11 +2,11 @@
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: github-stats
+  name: github-stats-exporter
   labels:
     app.kubernetes.io/component: exporter
 spec:
   minAvailable: 1
   selector:
     matchLabels:
-      app: github-stats
+      app: github-stats-exporter

@@ -2,7 +2,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: github-stats
+  name: github-stats-exporter
 spec:
   template:
     spec:
@@ -13,7 +13,7 @@ spec:
                 matchExpressions:
                   - key: app
                     operator: In
-                    values: ["github-stats"]
+                    values: ["github-stats-exporter"]
               topologyKey: kubernetes.io/hostname
       topologySpreadConstraints:
         - maxSkew: 1
@@ -21,4 +21,4 @@ spec:
           whenUnsatisfiable: ScheduleAnyway
           labelSelector:
             matchLabels:
-              app: github-stats
+              app: github-stats-exporter

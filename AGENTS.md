@@ -7,7 +7,7 @@ featured_image: "https://example.com/agents-md.png"
 categories: ["documentation", "devops"]
 tags: ["agents", "automation", "go", "docker", "kubernetes"]
 ai_note: "AI-assisted"
-summary: "Agent-focused guidance for working on github-stats, including setup, workflows, testing, and deployment."
+summary: "Agent-focused guidance for working on github-stats-exporter, including setup, workflows, testing, and deployment."
 post_date: "2026-02-17"
 ---
 
@@ -15,11 +15,11 @@ post_date: "2026-02-17"
 
 ## Project overview
 
-`github-stats` is a Go service that scrapes GitHub org metrics, stores them, and exposes an HTTP endpoint with metrics and health. It includes leader/follower roles, backfill processing, and Redis/RabbitMQ integrations for queueing and storage.
+`github-stats-exporter` is a Go service that scrapes GitHub org metrics, stores them, and exposes an HTTP endpoint with metrics and health. It includes leader/follower roles, backfill processing, and Redis/RabbitMQ integrations for queueing and storage.
 
 Key technologies:
 
-- Go 1.25 (module: `github.com/cam3ron2/github-stats`)
+- Go 1.25 (module: `github.com/cam3ron2/github-stats-exporter`)
 - Docker/Docker Compose for local runtime
 - Redis and RabbitMQ for storage/queueing
 - Prometheus/OpenMetrics exporter and HTTP health endpoints
@@ -64,9 +64,9 @@ Test conventions:
 
 ## Build and deployment
 
-- Local binary: `make build` produces `github-stats`
-- Docker build: `docker build -t github-stats:dev .`
-- Compose runtime: `make compose` (builds and runs `github-stats:dev`)
+- Local binary: `make build` produces `github-stats-exporter`
+- Docker build: `docker build -t github-stats-exporter:dev .`
+- Compose runtime: `make compose` (builds and runs `github-stats-exporter:dev`)
 
 Deployment inputs:
 

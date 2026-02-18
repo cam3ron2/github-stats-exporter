@@ -29,7 +29,7 @@ spec:
             - |
               exec redis-server \
                 --appendonly yes \
-                --replicaof redis-0.redis.github-stats.svc.cluster.local 6379
+                --replicaof redis-0.redis.github-stats-exporter.svc.cluster.local 6379
           ports:
             - name: redis
               containerPort: 6379
