@@ -69,9 +69,7 @@ labels:
     color: "#000000"
     description: This issue is related to Node.js
 # See https://docs.github.com/en/rest/reference/teams#add-or-update-team-repository-permissions for available options
-teams:
-  - name: platform-engineering
-    permission: admin
+teams: []
 # See https://docs.github.com/en/rest/repos/rules#update-a-repository-ruleset for
 # all available ruleset properties and a description of each.
 rulesets:
@@ -145,28 +143,7 @@ rulesets:
           # Whether pull requests targeting a matching
           # branch must be tested with the latest code.
           strict_required_status_checks_policy: true # Required field
-          required_status_checks:
-            # Update the list of checks that must pass before a pull request can be merged
-            # The default list includes checks for Cycode.
-            # Note: the context is required and must match the exact name of the status check.
-            # Note: the integration_id is optional and can be used to require
-            # checks from a specific integration. The integration_id is the ID of the
-            # GitHub App that created the status check.
-            # To find the integration_id, go to the repository settings in GitHub and click on
-            # the "GitHub Apps". Find the integration in the list and click on "Configure". From
-            # there, you will need to click on the "App Settings" link and the App ID will be
-            # displayed on the page. PLEASE NOTE: The "App Settings" links is not available on all
-            # apps. If you do not see the "App Settings" link, you should refer to the documentation
-            # for that specific integration to obtain the integration_id.
-            # For example, the integration_id for Cycode is 242055.
-            - context: "Cycode: IaC" # required exact name of status check
-              integration_id: 242055 # optional ID that this status check must originate from.
-            - context: "Cycode: SAST"
-              integration_id: 242055
-            - context: "Cycode: Secrets"
-              integration_id: 242055
-            - context: "Cycode: Vulnerable Dependencies"
-              integration_id: 242055
+          required_status_checks: []
     bypass_actors:
       - actor_id:
         actor_type: OrganizationAdmin
