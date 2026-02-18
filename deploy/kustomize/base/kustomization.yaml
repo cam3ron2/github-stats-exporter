@@ -7,7 +7,6 @@ resources:
   - serviceaccount.yaml
   - rbac.yaml
   - app-configmap.yaml
-  - app-secret-template.yaml
   - app-deployment.yaml
   - app-service-http.yaml
   - app-service-metrics.yaml
@@ -15,7 +14,6 @@ resources:
   - redis-service.yaml
   - redis-statefulset.yaml
   - redis-pdb.yaml
-  - rabbitmq-secret.yaml
   - rabbitmq-service.yaml
   - rabbitmq-statefulset.yaml
   - rabbitmq-pdb.yaml

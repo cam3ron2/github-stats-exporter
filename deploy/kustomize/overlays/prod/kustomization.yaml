@@ -10,3 +10,17 @@ patchesStrategicMerge:
   - patch-scale.yaml
   - patch-config.yaml
   - patch-app-hardening.yaml
+secretGenerator:
+  # Copy the example files under secrets/ to the filenames below before deploying.
+  - name: github-stats-secrets
+    files:
+      - org-a.pem=secrets/github/org-a.pem
+      - org-b.pem=secrets/github/org-b.pem
+  - name: rabbitmq-secret
+    files:
+      - username=secrets/rabbitmq/username
+      - password=secrets/rabbitmq/password
+      - erlang-cookie=secrets/rabbitmq/erlang-cookie
+generatorOptions:
+  # Keep stable secret names so existing secretKeyRef and volume mounts continue to work.
+  disableNameSuffixHash: true

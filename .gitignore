@@ -41,3 +41,7 @@ super-linter-output/
 *.key
 *.crt
 *.env
+
+# kustomize overlay secrets (keep only tracked example files)
+deploy/kustomize/overlays/*/secrets/rabbitmq/*
+!deploy/kustomize/overlays/*/secrets/rabbitmq/*.example
