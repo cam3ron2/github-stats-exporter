@@ -11,7 +11,7 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./config/local.yaml:/app/config/local.yaml:ro
+      - ${GITHUB_STATS_CONFIG_PATH:-./config/local.yaml}:/app/config/local.yaml:ro
       - ./config/keys:/app/keys:ro
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/readyz"]
@@ -32,7 +32,7 @@ services:
     ports:
       - "8081:8080"
     volumes:
-      - ./config/local.yaml:/app/config/local.yaml:ro
+      - ${GITHUB_STATS_CONFIG_PATH:-./config/local.yaml}:/app/config/local.yaml:ro
       - ./config/keys:/app/keys:ro
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/readyz"]

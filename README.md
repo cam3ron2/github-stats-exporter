@@ -1,5 +1,9 @@
 # GitHub Stats Exporter
 
+<p align="center">
+  <img src="docs/assets/logo-color-transparent-smooth.png" alt="github-stats-exporter logo" width="180" />
+</p>
+
 [![Test](https://github.com/cam3ron2/github-stats-exporter/actions/workflows/test.yml/badge.svg)](https://github.com/cam3ron2/github-stats-exporter/actions/workflows/test.yml)
 [![Lint](https://github.com/cam3ron2/github-stats-exporter/actions/workflows/lint.yml/badge.svg)](https://github.com/cam3ron2/github-stats-exporter/actions/workflows/lint.yml)
 [![Release](https://github.com/cam3ron2/github-stats-exporter/actions/workflows/release.yml/badge.svg)](https://github.com/cam3ron2/github-stats-exporter/actions/workflows/release.yml)
