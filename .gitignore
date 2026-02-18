@@ -26,6 +26,7 @@ config/keys/
 .gocache/
 .gomodcache/
 .golangci-cache/
+.cache/
 .vscode/
 
 # super-linter
