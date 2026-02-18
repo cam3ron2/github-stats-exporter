@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rabbitmq
+  labels:
+    app: rabbitmq
+spec:
+  serviceName: rabbitmq
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rabbitmq
+  template:
+    metadata:
+      labels:
+        app: rabbitmq
+    spec:
+      containers:
+        - name: rabbitmq
+          image: rabbitmq:3.13-management-alpine
+          ports:
+            - name: amqp
+              containerPort: 5672
+            - name: mgmt
+              containerPort: 15672
+          env:
+            - name: RABBITMQ_DEFAULT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-secret
+                  key: username
+            - name: RABBITMQ_DEFAULT_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-secret
+                  key: password
+            - name: RABBITMQ_ERLANG_COOKIE
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-secret
+                  key: erlang-cookie
+          readinessProbe:
+            exec:
+              command: ["rabbitmq-diagnostics", "check_running"]
+          livenessProbe:
+            exec:
+              command: ["rabbitmq-diagnostics", "check_running"]
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/rabbitmq
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 20Gi

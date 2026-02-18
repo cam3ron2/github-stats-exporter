@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: github-stats-http
+  labels:
+    app: github-stats
+spec:
+  selector:
+    app: github-stats
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

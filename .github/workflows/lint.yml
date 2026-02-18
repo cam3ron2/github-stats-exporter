@@ -1,0 +1,50 @@
+---
+# This workflow executes several linters on changed files based on languages used in your code base whenever
+# you push a code or open a pull request.
+#
+# You can adjust the behavior by modifying this file.
+# For more information, see:
+# https://github.com/github/super-linter
+name: Lint
+on: # yamllint disable-line rule:truthy
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  lint-fix:
+    name: Lint and Fix
+    permissions:
+      contents: read
+      packages: read
+      issues: write
+      pull-requests: write
+      statuses: write
+    runs-on: [2-core]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Super-Linter
+        uses: super-linter/super-linter@v8
+        env:
+          # exclude auto-generated files from linting
+          FILTER_REGEX_EXCLUDE: ".*.md|.*.MD|.*scripts/.*"
+          LINTER_RULES_PATH: .github/linters
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FIX_SHELL_SHFMT: true
+          FIX_YAML_PRETTIER: true
+          FIX_JSON_PRETTIER: true
+          FIX_GO_MODULES: true
+          VALIDATE_DOCKERFILE_HADOLINT: true
+          VALIDATE_GO_MODULES: true
+          VALIDATE_SHELL_SHFMT: true
+          VALIDATE_YAML_PRETTIER: true
+          VALIDATE_JSON_PRETTIER: true
+          VALIDATE_CHECKOV: true
+          VALIDATE_GITHUB_ACTIONS: true
+          VALIDATE_GITLEAKS: true
+      - name: Commit and push linting fixes
+        uses: stefanzweifel/git-auto-commit-action@v7
+        with:
+          branch: ${{ github.event.pull_request.head.ref || github.head_ref || github.ref }}
+          commit_message: "chore: fix linter errors"

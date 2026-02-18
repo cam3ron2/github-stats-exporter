@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-sentinel
+  labels:
+    app: redis-sentinel
+spec:
+  selector:
+    app: redis-sentinel
+  ports:
+    - name: sentinel
+      port: 26379
+      targetPort: sentinel
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-sentinel
+  labels:
+    app: redis-sentinel
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: redis-sentinel
+  template:
+    metadata:
+      labels:
+        app: redis-sentinel
+    spec:
+      containers:
+        - name: sentinel
+          image: redis:7.2-alpine
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              cat <<'EOF' > /tmp/sentinel.conf
+              port 26379
+              sentinel monitor mymaster redis-0.redis.github-stats.svc.cluster.local 6379 2
+              sentinel down-after-milliseconds mymaster 5000
+              sentinel failover-timeout mymaster 60000
+              sentinel parallel-syncs mymaster 1
+              EOF
+              exec redis-sentinel /tmp/sentinel.conf
+          ports:
+            - name: sentinel
+              containerPort: 26379

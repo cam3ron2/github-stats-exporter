@@ -1,0 +1,41 @@
+---
+# requires pre-commit
+# For more information, visit https://pre-commit.com/
+# To install on OSX: brew install pre-commit
+# To install on other systems: https://pre-commit.com/#installation
+# To set up the git hook scripts: pre-commit install
+# To run manually: pre-commit run --all-files
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.0
+    hooks:
+      - id: gitleaks
+        args: ["--config=.github/linters/.gitleaks.toml"]
+  - repo: https://github.com/bridgecrewio/checkov
+    rev: 3.2.499
+    hooks:
+      - id: checkov
+        args: ["--config-file=.github/linters/.checkov.yml"]
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.38.0
+    hooks:
+      - id: yamllint
+        args: ["-c", ".github/linters/.yaml-lint.yml"]
+  - repo: https://github.com/google/yamlfmt
+    rev: v0.21.0
+    hooks:
+      - id: yamlfmt
+        args: ["-conf", ".github/linters/.yamlfmt.yml"]
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.10
+    hooks:
+      - id: actionlint
+        args: ["-config-file", ".github/linters/actionlint.yml"]
+  - repo: https://github.com/DavidAnson/markdownlint-cli2
+    rev: v0.13.0
+    hooks:
+      - id: markdownlint-cli2
+        args:
+          - --config
+          - .github/linters/.markdown-lint.yml
+          - .

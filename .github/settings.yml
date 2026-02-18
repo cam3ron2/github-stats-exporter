@@ -1,0 +1,185 @@
+# These settings are synced to GitHub by https://probot.github.io/apps/settings/
+---
+repository:
+  # See https://docs.github.com/en/rest/repos/repos#update-a-repository for all available settings.
+  topics: actions, node, template
+  has_issues: true
+  has_projects: true
+  has_wiki: false
+  has_downloads: false
+  default_branch: main
+  allow_squash_merge: true
+  allow_auto_merge: true
+  allow_merge_commit: true
+  allow_rebase_merge: false
+  delete_branch_on_merge: true
+  enable_automated_security_fixes: true
+  enable_vulnerability_alerts: true
+# Labels: define labels for Issues and Pull Requests
+labels:
+  - name: bug
+    color: "#CC0000"
+    description: An issue with the system.
+  - name: feature
+    color: "#336699"
+    description: Introduces new functionality.
+  - name: security
+    color: "#FF0000"
+    description: Security issues or vulnerabilities
+  - name: warning
+    color: "#FFA500"
+    description: SARIF Issue severity is warning
+  - name: error
+    color: "#FF0000"
+    description: SARIF Issue severity is error
+  - name: note
+    color: "#FFFF00"
+    description: SARIF Issue severity is note
+  - name: wontfix
+    color: "#000000"
+    description: This issue will not be fixed
+  - name: release-ignore
+    color: "#000000"
+    description: This issue will not be included in the release notes
+  - name: docker
+    color: "#000000"
+    description: This issue is related to Docker
+  - name: dependencies
+    color: "#000000"
+    description: This issue is related to dependencies
+  - name: documentation
+    color: "#000000"
+    description: This issue is related to documentation
+  - name: breaking-change
+    color: "#000000"
+    description: This issue introduces a breaking change
+  - name: deprecation
+    color: "#000000"
+    description: This issue deprecates a feature
+  - name: actions
+    color: "#000000"
+    description: This issue is related to GitHub Actions
+  - name: go
+    color: "#000000"
+    description: This issue is related to Go
+  - name: python
+    color: "#000000"
+    description: This issue is related to Python
+  - name: npm
+    color: "#000000"
+    description: This issue is related to Node.js
+# See https://docs.github.com/en/rest/reference/teams#add-or-update-team-repository-permissions for available options
+teams:
+  - name: platform-engineering
+    permission: admin
+# See https://docs.github.com/en/rest/repos/rules#update-a-repository-ruleset for
+# all available ruleset properties and a description of each.
+rulesets:
+  - name: prevent deletion of the default branch
+    target: branch
+    enforcement: active
+    conditions:
+      ref_name:
+        include:
+          - "~DEFAULT_BRANCH"
+        exclude: []
+    rules:
+      - type: deletion
+      - type: non_fast_forward
+  - name: require reviewed pull requests
+    target: branch
+    enforcement: active
+    conditions:
+      ref_name:
+        include:
+          - "~DEFAULT_BRANCH"
+        exclude: []
+    rules:
+      - type: pull_request
+        parameters:
+          required_approving_review_count: 1
+          dismiss_stale_reviews_on_push: true
+          require_code_owner_review: true
+          require_last_push_approval: true
+          required_review_thread_resolution: true
+          allowed_merge_methods:
+            - merge
+            - squash
+            - rebase
+    bypass_actors:
+      # Allow organization admins to bypass pull request reviews
+      - actor_id:
+        actor_type: OrganizationAdmin
+        bypass_mode: always
+      # Allow deploy keys to bypass pull request reviews for CI
+      - actor_id:
+        actor_type: DeployKey
+        bypass_mode: always
+      # Allow enterprise owners to bypass pull request reviews
+      - actor_id:
+        actor_type: EnterpriseOwner
+        bypass_mode: always
+      # Allow repository admin role to bypass pull request reviews
+      # usable repository role ids are:
+      # 2: Maintain
+      # 4: Write
+      # 5: Admin
+      - actor_id: 5
+        actor_type: RepositoryRole
+        bypass_mode: always
+      # Allow niq-token-generator app to bypass pull request reviews
+      - actor_id: 305342
+        actor_type: Integration
+        bypass_mode: always
+  - name: required status checks must pass
+    target: branch
+    enforcement: active
+    conditions:
+      ref_name:
+        include:
+          - "~DEFAULT_BRANCH"
+        exclude: []
+    rules:
+      - type: required_status_checks
+        parameters:
+          # Whether pull requests targeting a matching
+          # branch must be tested with the latest code.
+          strict_required_status_checks_policy: true # Required field
+          required_status_checks:
+            # Update the list of checks that must pass before a pull request can be merged
+            # The default list includes checks for Cycode.
+            # Note: the context is required and must match the exact name of the status check.
+            # Note: the integration_id is optional and can be used to require
+            # checks from a specific integration. The integration_id is the ID of the
+            # GitHub App that created the status check.
+            # To find the integration_id, go to the repository settings in GitHub and click on
+            # the "GitHub Apps". Find the integration in the list and click on "Configure". From
+            # there, you will need to click on the "App Settings" link and the App ID will be
+            # displayed on the page. PLEASE NOTE: The "App Settings" links is not available on all
+            # apps. If you do not see the "App Settings" link, you should refer to the documentation
+            # for that specific integration to obtain the integration_id.
+            # For example, the integration_id for Cycode is 242055.
+            - context: "Cycode: IaC" # required exact name of status check
+              integration_id: 242055 # optional ID that this status check must originate from.
+            - context: "Cycode: SAST"
+              integration_id: 242055
+            - context: "Cycode: Secrets"
+              integration_id: 242055
+            - context: "Cycode: Vulnerable Dependencies"
+              integration_id: 242055
+    bypass_actors:
+      - actor_id:
+        actor_type: OrganizationAdmin
+        bypass_mode: always
+      - actor_id:
+        actor_type: DeployKey
+        bypass_mode: always
+      - actor_id:
+        actor_type: EnterpriseOwner
+        bypass_mode: always
+      - actor_id: 5
+        actor_type: RepositoryRole
+        bypass_mode: always
+      - actor_id: 305342
+        actor_type: Integration
+        bypass_mode: always

@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: github-stats
+spec:
+  replicas: 5
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+spec:
+  replicas: 3
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rabbitmq
+spec:
+  replicas: 3
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: github-stats
+spec:
+  minAvailable: 2

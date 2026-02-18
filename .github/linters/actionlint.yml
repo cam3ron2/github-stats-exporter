@@ -1,0 +1,14 @@
+---
+# Configuration related to self-hosted runners.
+self-hosted-runner:
+  # Labels of self-hosted runner in array of strings.
+  labels:
+    - half-core
+    - self-hosted
+    - 1-core
+    - 2-core
+    - 4-core
+    - 6-core
+    - 8-core
+    - 10-core
+    - 12-core

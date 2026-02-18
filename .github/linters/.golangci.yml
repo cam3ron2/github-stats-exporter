@@ -1,0 +1,53 @@
+---
+version: "2"
+run:
+  modules-download-mode: mod
+linters:
+  enable:
+    - bidichk
+    - bodyclose
+    - ginkgolinter
+    - goconst
+    - gocritic
+    - gocyclo
+    - gosec
+    - unconvert
+    - whitespace
+    - lll
+  settings:
+    errcheck:
+      check-blank: true
+    gocyclo:
+      min-complexity: 15
+    govet:
+      enable:
+        - shadow
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - gocyclo
+          - dupl
+          - errcheck
+          - goconst
+          - gosec
+          - lll
+        path: _test\.go
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

@@ -1,0 +1,16 @@
+.git/
+dist/
+.github/
+**/*.json
+**/*.yml
+**/*.yaml
+.gitignore
+CHANGELOG.md
+CODEOWNERS
+Dockerfile
+.gocache/
+.gomodcache/
+config/
+deploy/
+**/*.md
+Makefile

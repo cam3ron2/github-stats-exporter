@@ -1,0 +1,6 @@
+scrape_configs:
+  - job_name: github-stats
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - github-stats-metrics.github-stats.svc.cluster.local:8080

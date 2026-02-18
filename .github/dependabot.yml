@@ -1,0 +1,30 @@
+#dependabot-gen:ignore
+---
+version: 2
+registries:
+  github-niq:
+    type: git
+    url: https://github.com
+    username: x-access-token
+    password: ${{secrets.DEPENDABOT_ORG_TOKEN}}
+updates:
+  - package-ecosystem: github-actions
+    directories:
+      - /
+    schedule:
+      interval: daily
+    labels:
+      - dependencies
+      - actions
+    open-pull-requests-limit: 10
+    registries:
+      - github-niq
+  - package-ecosystem: npm
+    directories:
+      - /
+    schedule:
+      interval: daily
+    labels:
+      - dependencies
+      - npm
+    open-pull-requests-limit: 10
