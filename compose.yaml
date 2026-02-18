@@ -25,9 +25,6 @@ services:
         condition: service_healthy
     restart: unless-stopped
   github-stats-exporter-follower:
-    build:
-      context: .
-      dockerfile: Dockerfile
     image: github-stats-exporter:dev
     command: ["--config=/app/config/local.yaml"]
     environment:

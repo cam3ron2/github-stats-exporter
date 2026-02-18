@@ -37,29 +37,29 @@ default: help
 .PHONY: test
 test:
 	@echo "${YELLOW}[TEST] ${GREEN}Start Running unit tests.${RESET}"
-	$(call quiet-command,go test -race -v -count=1 -timeout 45s ./...)
+	$(call quiet-command,$(GO) test -race -v -count=1 -timeout 45s ./...)
 
 ## Run the application
 .PHONY: run
 run:
 	@echo "${YELLOW}[RUN] ${GREEN}Starting application.${RESET}"
-	go run $(CMD_SOURCE) --config=config/local.yaml
+	$(GO) run $(CMD_SOURCE) --config=config/local.yaml
 
 ## Update formatting with go fmt
 .PHONY: fmt
 fmt:
 	@echo "${YELLOW}[LINT] ${GREEN}Formatting go files.${RESET}"
-	$(call quiet-command,go fmt ./...)
+	$(call quiet-command,$(GO) fmt ./...)
 
 .PHONY: coverage/generate
 coverage/generate:
 	@echo "${YELLOW}[TEST] ${GREEN}Start Running unit tests and generating coverage report.${RESET}"
-	$(call quiet-command,go test -race -v -cover -coverpkg=./... -coverprofile=cover.out -count=1 -timeout 45s ./...)
+	$(call quiet-command,$(GO) test -race -v -cover -coverpkg=./... -coverprofile=cover.out -count=1 -timeout 45s ./...)
 
 .PHONY: coverage/load
 coverage/load:
 	@echo "${YELLOW}[TEST] ${GREEN}Start Loading coverage report.${RESET}"
-	$(call quiet-command,go tool cover -html=cover.out)
+	$(call quiet-command,$(GO) tool cover -html=cover.out)
 
 ## Generate and load coverage report
 .PHONY: coverage
@@ -69,7 +69,8 @@ coverage: coverage/generate coverage/load
 .PHONY: build
 build :
 	@echo "${YELLOW}[RUN] ${GREEN}Building binary with go build.${RESET}"
-	go build -ldflags "$(LD_FLAGS)" $(GO_FLAGS) -o ./dist/$(BINARY_NAME) $(CMD_SOURCE)
+	@mkdir -p ./dist
+	$(GO) build -ldflags "$(LD_FLAGS)" $(GO_FLAGS) -o ./dist/$(BINARY_NAME) $(CMD_SOURCE)
 
 ## Build the container
 .PHONY: build-docker
@@ -176,7 +177,7 @@ dependabot/bulk:
 ## Remove generated files
 .PHONY: clean
 clean :
-	go clean
+	$(GO) clean
 	$(call rm-command,$(BINARY_NAME))
 	$(call rm-command,dist/*)
 	$(call rm-command,coverage.out)
