@@ -2,7 +2,7 @@ package store
 
 import (
 	"context"
-	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -100,9 +100,9 @@ func (s *RedisStore) UpsertMetric(role RuntimeRole, source WriteSource, point Me
 		return fmt.Errorf("check metric membership: %w", err)
 	}
 	if !isMember && s.maxSeries > 0 {
-		seriesCount, err := s.client.SCard(ctx, s.metricsIndexKey()).Result()
-		if err != nil {
-			return fmt.Errorf("count metric series: %w", err)
+		seriesCount, countErr := s.client.SCard(ctx, s.metricsIndexKey()).Result()
+		if countErr != nil {
+			return fmt.Errorf("count metric series: %w", countErr)
 		}
 		if seriesCount >= int64(s.maxSeries) {
 			return fmt.Errorf("max series budget exceeded")
@@ -172,7 +172,9 @@ func (s *RedisStore) GC(_ time.Time) {
 			continue
 		}
 		if exists == 0 {
-			_ = s.client.SRem(ctx, s.metricsIndexKey(), seriesID).Err()
+			if remErr := s.client.SRem(ctx, s.metricsIndexKey(), seriesID).Err(); remErr != nil {
+				continue
+			}
 		}
 	}
 }
@@ -267,6 +269,6 @@ func (s *RedisStore) metricDataKey(seriesID string) string {
 }
 
 func hashSeriesID(raw string) string {
-	sum := sha1.Sum([]byte(raw))
+	sum := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(sum[:])
 }

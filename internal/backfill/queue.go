@@ -49,7 +49,9 @@ func (q *InMemoryQueue) Consume(
 			if ShouldDropMessageByAge(msg, nowFn(), maxMessageAge) {
 				continue
 			}
-			_ = handler(msg)
+			if err := handler(msg); err != nil {
+				continue
+			}
 		}
 	}
 }

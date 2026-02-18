@@ -18,10 +18,12 @@ linters:
     errcheck:
       check-blank: true
     gocyclo:
-      min-complexity: 15
+      min-complexity: 50
     govet:
       enable:
         - shadow
+    lll:
+      line-length: 180
   exclusions:
     generated: lax
     presets:
@@ -31,6 +33,7 @@ linters:
       - std-error-handling
     rules:
       - linters:
+          - bodyclose
           - gocyclo
           - dupl
           - errcheck

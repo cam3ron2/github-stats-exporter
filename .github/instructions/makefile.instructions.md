@@ -42,15 +42,15 @@ all: program
 
 # Rules
 program: $(objects)
-	$(CC) -o program $(objects)
+ $(CC) -o program $(objects)
 
 %.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+ $(CC) $(CFLAGS) -c $< -o $@
 
 # Phony targets
 .PHONY: clean all
 clean:
-	rm -f program $(objects)
+ rm -f program $(objects)
 ```
 
 ## Variables and Substitution
@@ -91,14 +91,14 @@ The example below shows a pattern rule that compiles objects into an `obj/` dire
 ```makefile
 # Normal prerequisites
 program: main.o utils.o
-	$(CC) -o $@ $^
+ $(CC) -o $@ $^
 
 # Order-only prerequisites (directory creation)
 obj/%.o: %.c | obj
-	$(CC) $(CFLAGS) -c $< -o $@
+ $(CC) $(CFLAGS) -c $< -o $@
 
 obj:
-	mkdir -p obj
+ mkdir -p obj
 ```
 
 ## Recipes and Commands
@@ -113,19 +113,19 @@ obj:
 ```makefile
 # Silent command
 clean:
-	@echo "Cleaning up..."
-	@rm -f $(objects)
+ @echo "Cleaning up..."
+ @rm -f $(objects)
 
 # Ignore errors
 .PHONY: clean-all
 clean-all:
-	-rm -rf build/
-	-rm -rf dist/
+ -rm -rf build/
+ -rm -rf dist/
 
 # Multi-line recipe with proper continuation
 install: program
-	install -d $(PREFIX)/bin && \
-		install -m 755 program $(PREFIX)/bin
+ install -d $(PREFIX)/bin && \
+  install -m 755 program $(PREFIX)/bin
 ```
 
 ## Phony Targets
@@ -140,13 +140,13 @@ install: program
 all: program
 
 clean:
-	rm -f program $(objects)
+ rm -f program $(objects)
 
 test: program
-	./run-tests.sh
+ ./run-tests.sh
 
 install: program
-	install -m 755 program $(PREFIX)/bin
+ install -m 755 program $(PREFIX)/bin
 ```
 
 ## Pattern Rules and Implicit Rules
@@ -163,7 +163,7 @@ CFLAGS = -Wall -O2
 
 # Custom pattern rule for special cases
 %.pdf: %.md
-	pandoc $< -o $@
+ pandoc $< -o $@
 ```
 
 ## Splitting Long Lines
@@ -175,7 +175,7 @@ CFLAGS = -Wall -O2
 
 ### Splitting Without Adding Whitespace
 
-If you need to split a line without adding whitespace, you can use a special technique: insert `$ ` (dollar-space) followed by a backslash-newline. The `$ ` refers to a variable with a single-space name, which doesn't exist and expands to nothing, effectively joining the lines without inserting a space.
+If you need to split a line without adding whitespace, you can use a special technique: insert `$` (dollar-space) followed by a backslash-newline. The `$` refers to a variable with a single-space name, which doesn't exist and expands to nothing, effectively joining the lines without inserting a space.
 
 ```makefile
 # Concatenate strings without adding whitespace
@@ -196,9 +196,9 @@ sources = main.c \
 
 # Recipe with long command
 build: $(objects)
-	$(CC) -o program $(objects) \
-	      $(LDFLAGS) \
-	      -lm -lpthread
+ $(CC) -o program $(objects) \
+       $(LDFLAGS) \
+       -lm -lpthread
 ```
 
 ## Including Other Makefiles
@@ -231,7 +231,7 @@ else
 endif
 
 program: main.o
-	$(CC) -o program$(EXE_EXT) main.o
+ $(CC) -o program$(EXE_EXT) main.o
 ```
 
 ## Automatic Prerequisites
@@ -249,7 +249,7 @@ deps = $(objects:.o=.d)
 
 # Compile with automatic dependency generation
 %.o: %.c
-	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+ $(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 ```
 
 ## Error Handling and Debugging
@@ -282,11 +282,11 @@ endif
 .PHONY: clean distclean
 
 clean:
-	-rm -f $(objects)
-	-rm -f $(deps)
+ -rm -f $(objects)
+ -rm -f $(deps)
 
 distclean: clean
-	-rm -f program config.mk
+ -rm -f program config.mk
 ```
 
 ## Portability Considerations
@@ -364,17 +364,17 @@ objects = main.o utils.o parser.o
 all: program
 
 program: $(objects)
-	$(CC) -o $@ $^
+ $(CC) -o $@ $^
 
 %.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+ $(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	-rm -f program $(objects)
+ -rm -f program $(objects)
 
 install: program
-	install -d $(PREFIX)/bin
-	install -m 755 program $(PREFIX)/bin
+ install -d $(PREFIX)/bin
+ install -m 755 program $(PREFIX)/bin
 ```
 
 ### Managing Multiple Programs
@@ -387,16 +387,16 @@ programs = prog1 prog2 prog3
 all: $(programs)
 
 prog1: prog1.o common.o
-	$(CC) -o $@ $^
+ $(CC) -o $@ $^
 
 prog2: prog2.o common.o
-	$(CC) -o $@ $^
+ $(CC) -o $@ $^
 
 prog3: prog3.o
-	$(CC) -o $@ $^
+ $(CC) -o $@ $^
 
 clean:
-	-rm -f $(programs) *.o
+ -rm -f $(programs) *.o
 ```
 
 ## Anti-Patterns to Avoid

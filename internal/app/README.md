@@ -4,11 +4,18 @@
 
 The `app` package wires runtime role behavior (leader vs follower), scrape/backfill loops, shared health state, and HTTP endpoint composition.
 
-- Leader mode runs scheduled scrape cycles and writes metrics to the store.
+- Runtime backend wiring selects shared dependencies from config:
+  - Redis store when `store.backend=redis` and connection succeeds.
+  - In-memory store fallback if Redis init fails.
+  - RabbitMQ management API queue when AMQP config is present.
+  - In-memory queue fallback if RabbitMQ init fails.
+- Leader mode runs scheduled scrape cycles and writes metrics to the shared store.
 - Each leader cycle also writes `gh_exporter_leader_cycle_last_run_unixtime` so `/metrics` is non-empty even when no activity metrics are produced.
 - Leader cycles enqueue targeted backfill for both whole-org failures and per-repo missed windows returned by scraper partial results.
-- Follower mode consumes backfill jobs from the queue and writes backfill result metrics.
-- Health status is evaluated from role-aware dependency flags.
+- GitHub unhealthy cooldown gates scheduled scraping after repeated failures and enqueues `github_unhealthy` backfill jobs while cooling down.
+- Leader cycles run store GC and emit operational metrics (`scrape_runs_total`, `store_write_total`, backfill enqueue counters, dependency health).
+- Follower mode consumes backfill jobs, applies idempotency locks, and writes backfill processing metrics.
+- Health status is evaluated from role-aware dependency flags and continuously exported as `gh_exporter_dependency_health`.
 - HTTP routing exposes `/metrics`, `/livez`, `/readyz`, and `/healthz`.
 - Runtime logs include role startup context plus per-cycle scrape summaries for easier operational debugging.
 
@@ -22,13 +29,13 @@ The `app` package wires runtime role behavior (leader vs follower), scrape/backf
 
 ### Functions
 
-- `NewRuntime(cfg *config.Config, orgScraper scrape.OrgScraper, logger ...*zap.Logger) *Runtime`: constructs runtime defaults, in-memory store/queue, dispatcher, and scrape manager.
+- `NewRuntime(cfg *config.Config, orgScraper scrape.OrgScraper, logger ...*zap.Logger) *Runtime`: constructs runtime, initializes configured store/queue backends with safe fallbacks, creates dispatcher, and wires scrape manager.
 - `NewHTTPHandler(metricsHandler http.Handler, healthHandler http.Handler) http.Handler`: returns a chi router for metrics and health endpoints.
 - `NewRoleManager(hooks RoleHooks) *RoleManager`: constructs a role manager.
 
 ### Methods
 
-- `(*Runtime) Store() *store.MemoryStore`: returns the runtime metric store.
+- `(*Runtime) Store() runtimeStore`: returns the runtime metric store abstraction used by exporter/tests.
 - `(*Runtime) QueueDepth() int`: returns queued backfill message depth.
 - `(*Runtime) Handler() http.Handler`: returns combined metrics+health handler.
 - `(*Runtime) StartLeader(ctx context.Context)`: transitions runtime into leader loop.

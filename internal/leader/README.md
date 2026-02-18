@@ -8,6 +8,7 @@ The `leader` package provides leadership-event orchestration primitives used to 
 - `Runner` converts election callbacks into role and error channels for consumers like runtime role managers.
 - Role transitions are deduplicated to avoid repeated `leader -> leader` or `follower -> follower` churn.
 - Context cancellation is treated as normal shutdown and not surfaced as an error.
+- `KubernetesLeaseElector` performs lease create/renew/takeover decisions directly through Kubernetes coordination API Lease resources.
 
 ## API reference
 
@@ -17,13 +18,18 @@ The `leader` package provides leadership-event orchestration primitives used to 
 - `Runner`: wraps an `Elector` and exposes role/error channels.
 - `StaticElector`: emits a fixed role and waits for context cancellation.
 - `ChannelElector`: emits role transitions from a channel.
+- `KubernetesLeaseConfig`: configuration for Lease API endpoint, identity, timing, and HTTP client behavior.
+- `KubernetesLeaseElector`: Lease-backed elector implementation.
 
 ### Functions
 
 - `NewRunner(elector Elector, logger ...*zap.Logger) *Runner`: creates a runner with optional zap logger.
+- `NewKubernetesLeaseElector(cfg KubernetesLeaseConfig) (*KubernetesLeaseElector, error)`: creates a Lease-backed elector.
 
 ### Methods
 
 - `(*Runner) Start(ctx context.Context) (<-chan bool, <-chan error)`: starts election observation and returns deduplicated role transitions plus fatal election errors.
 - `(StaticElector) Run(ctx context.Context, emit func(isLeader bool)) error`: emits the configured role once.
 - `(ChannelElector) Run(ctx context.Context, emit func(isLeader bool)) error`: relays events from `Events` until close or cancellation.
+- `(*KubernetesLeaseElector) Run(ctx context.Context, emit func(isLeader bool)) error`: periodically acquires/renews the configured Lease and emits leadership state.
+- `(*KubernetesLeaseElector) TryAcquireOrRenew(ctx context.Context) (bool, error)`: executes one Lease acquisition/renewal decision.

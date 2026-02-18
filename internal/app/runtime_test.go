@@ -13,11 +13,27 @@ import (
 )
 
 type fakeOrgScraper struct {
-	result scrape.OrgResult
-	err    error
+	result  scrape.OrgResult
+	err     error
+	results []scrape.OrgResult
+	errs    []error
+	calls   int
 }
 
 func (s *fakeOrgScraper) ScrapeOrg(_ context.Context, _ config.GitHubOrgConfig) (scrape.OrgResult, error) {
+	s.calls++
+	index := s.calls - 1
+	if index < len(s.results) || index < len(s.errs) {
+		var result scrape.OrgResult
+		if index < len(s.results) {
+			result = s.results[index]
+		}
+		var err error
+		if index < len(s.errs) {
+			err = s.errs[index]
+		}
+		return result, err
+	}
 	return s.result, s.err
 }
 
@@ -244,9 +260,184 @@ func TestRuntimeCurrentStatusRoleAware(t *testing.T) {
 	}
 }
 
+func TestRuntimeRunLeaderCycleAppliesGitHubUnhealthyCooldown(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	cfg.GitHub.UnhealthyFailureThreshold = 2
+	cfg.GitHub.UnhealthyCooldown = 10 * time.Minute
+	cfg.Health.GitHubRecoverSuccessThreshold = 2
+
+	scraper := &fakeOrgScraper{
+		results: []scrape.OrgResult{{}, {}, {}, {}},
+		errs: []error{
+			errors.New("github unavailable"),
+			errors.New("github unavailable"),
+			nil,
+			nil,
+		},
+	}
+	runtime := NewRuntime(cfg, scraper)
+
+	now := time.Unix(1739836800, 0)
+	runtime.Now = func() time.Time { return now }
+
+	if err := runtime.RunLeaderCycle(context.Background()); err == nil {
+		t.Fatalf("RunLeaderCycle(first) expected error, got nil")
+	}
+
+	now = now.Add(time.Minute)
+	if err := runtime.RunLeaderCycle(context.Background()); err == nil {
+		t.Fatalf("RunLeaderCycle(second) expected error, got nil")
+	}
+
+	now = now.Add(time.Minute)
+	if err := runtime.RunLeaderCycle(context.Background()); err != nil {
+		t.Fatalf("RunLeaderCycle(third/cooldown) unexpected error: %v", err)
+	}
+	if scraper.calls != 2 {
+		t.Fatalf("scrape calls during cooldown = %d, want 2", scraper.calls)
+	}
+
+	now = now.Add(cfg.GitHub.UnhealthyCooldown + time.Second)
+	if err := runtime.RunLeaderCycle(context.Background()); err != nil {
+		t.Fatalf("RunLeaderCycle(fourth/post-cooldown) unexpected error: %v", err)
+	}
+	if scraper.calls != 3 {
+		t.Fatalf("scrape calls after cooldown = %d, want 3", scraper.calls)
+	}
+
+	now = now.Add(time.Minute)
+	if err := runtime.RunLeaderCycle(context.Background()); err != nil {
+		t.Fatalf("RunLeaderCycle(fifth/recovery) unexpected error: %v", err)
+	}
+	if scraper.calls != 4 {
+		t.Fatalf("scrape calls after recovery = %d, want 4", scraper.calls)
+	}
+
+	status := runtime.CurrentStatus(context.Background())
+	if got := status.Components["github_healthy"]; !got {
+		t.Fatalf("github_healthy = %t, want true after recovery", got)
+	}
+}
+
+func TestRuntimeRunLeaderCycleWritesOperationalMetrics(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	now := time.Unix(1739836800, 0)
+	runtime := NewRuntime(cfg, &fakeOrgScraper{
+		result: scrape.OrgResult{
+			MissedWindow: []scrape.MissedWindow{
+				{
+					Org:         "org-a",
+					Repo:        "repo-a",
+					WindowStart: now.Add(-time.Hour),
+					WindowEnd:   now,
+					Reason:      "scrape_error",
+				},
+			},
+		},
+	})
+	runtime.Now = func() time.Time { return now }
+
+	if err := runtime.RunLeaderCycle(context.Background()); err != nil {
+		t.Fatalf("RunLeaderCycle() unexpected error: %v", err)
+	}
+
+	snapshot := runtime.Store().Snapshot()
+	testCases := []struct {
+		name   string
+		metric string
+		labels map[string]string
+	}{
+		{
+			name:   "scrape run success",
+			metric: "gh_exporter_scrape_runs_total",
+			labels: map[string]string{"org": "org-a", "result": "success"},
+		},
+		{
+			name:   "store write success",
+			metric: "gh_exporter_store_write_total",
+			labels: map[string]string{"source": "leader_scrape", "result": "success"},
+		},
+		{
+			name:   "backfill enqueue count",
+			metric: "gh_exporter_backfill_jobs_enqueued_total",
+			labels: map[string]string{"org": "org-a", "reason": "scrape_error"},
+		},
+		{
+			name:   "dependency health github",
+			metric: "gh_exporter_dependency_health",
+			labels: map[string]string{"dependency": "github"},
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			metric := findMetricWithLabels(snapshot, tc.metric, tc.labels)
+			if metric == nil {
+				t.Fatalf("missing metric %s labels=%v", tc.metric, tc.labels)
+			}
+		})
+	}
+}
+
+func TestRuntimeRunLeaderCycleRunsStoreGC(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	cfg.Store.Retention = time.Nanosecond
+	now := time.Unix(1739836800, 0)
+
+	runtime := NewRuntime(cfg, &fakeOrgScraper{})
+	runtime.Now = func() time.Time { return now }
+
+	err := runtime.Store().UpsertMetric(store.RoleLeader, store.SourceLeaderScrape, store.MetricPoint{
+		Name:      "gh_activity_commits_24h",
+		Labels:    map[string]string{"org": "org-a", "repo": "repo-a", "user": "alice"},
+		Value:     1,
+		UpdatedAt: now.Add(-time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("preload metric unexpected error: %v", err)
+	}
+
+	if err := runtime.RunLeaderCycle(context.Background()); err != nil {
+		t.Fatalf("RunLeaderCycle() unexpected error: %v", err)
+	}
+
+	points := runtime.Store().Snapshot()
+	if metric := findMetric(points, "gh_activity_commits_24h"); metric != nil {
+		t.Fatalf("stale activity metric was not garbage-collected")
+	}
+}
+
 func findMetric(points []store.MetricPoint, name string) *store.MetricPoint {
 	for i := range points {
 		if points[i].Name == name {
+			return &points[i]
+		}
+	}
+	return nil
+}
+
+func findMetricWithLabels(points []store.MetricPoint, name string, labels map[string]string) *store.MetricPoint {
+	for i := range points {
+		point := points[i]
+		if point.Name != name {
+			continue
+		}
+		match := true
+		for key, value := range labels {
+			if point.Labels[key] != value {
+				match = false
+				break
+			}
+		}
+		if match {
 			return &points[i]
 		}
 	}

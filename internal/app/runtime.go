@@ -16,26 +16,43 @@ import (
 	"go.uber.org/zap"
 )
 
+type runtimeStore interface {
+	UpsertMetric(role store.RuntimeRole, source store.WriteSource, point store.MetricPoint) error
+	AcquireJobLock(jobID string, ttl time.Duration, now time.Time) bool
+	Acquire(key string, ttl time.Duration, now time.Time) bool
+	Snapshot() []store.MetricPoint
+	GC(now time.Time)
+}
+
+type runtimeQueue interface {
+	Publish(msg backfill.Message) error
+	Consume(ctx context.Context, handler func(backfill.Message) error, maxMessageAge time.Duration, nowFn func() time.Time)
+	Depth() int
+}
+
 // Runtime is the application runtime orchestrator.
 type Runtime struct {
 	cfg         *config.Config
-	store       *store.MemoryStore
-	queue       *backfill.InMemoryQueue
+	store       runtimeStore
+	queue       runtimeQueue
 	dispatcher  *backfill.Dispatcher
 	scrapeMgr   *scrape.Manager
 	evaluator   *health.StatusEvaluator
 	logger      *zap.Logger
 	noopScraper bool
 
-	mu                 sync.RWMutex
-	role               health.Role
-	redisHealthy       bool
-	amqpHealthy        bool
-	schedulerHealthy   bool
-	githubClientUsable bool
-	consumerHealthy    bool
-	exporterHealthy    bool
-	githubHealthy      bool
+	mu                  sync.RWMutex
+	role                health.Role
+	redisHealthy        bool
+	amqpHealthy         bool
+	schedulerHealthy    bool
+	githubClientUsable  bool
+	consumerHealthy     bool
+	exporterHealthy     bool
+	githubHealthy       bool
+	githubCooldownUntil time.Time
+	githubFailureStreak int
+	githubRecoverStreak int
 
 	leaderCancel   context.CancelFunc
 	followerCancel context.CancelFunc
@@ -70,18 +87,17 @@ func NewRuntime(cfg *config.Config, orgScraper scrape.OrgScraper, logger ...*zap
 		maxSeries = 1_000_000
 	}
 
-	memStore := store.NewMemoryStore(retention, maxSeries)
-	queue := backfill.NewInMemoryQueue(10000)
+	storeBackend, queueBackend := newRuntimeBackends(cfg, baseLogger, retention, maxSeries)
 	dispatcher := backfill.NewDispatcher(backfill.Config{
 		CoalesceWindow:             cfg.Backfill.CoalesceWindow,
 		DedupTTL:                   cfg.Backfill.DedupTTL,
 		MaxEnqueuesPerOrgPerMinute: cfg.Backfill.MaxEnqueuesPerOrgPerMinute,
-	}, queue, memStore)
+	}, queueBackend, storeBackend)
 
 	return &Runtime{
 		cfg:                cfg,
-		store:              memStore,
-		queue:              queue,
+		store:              storeBackend,
+		queue:              queueBackend,
 		dispatcher:         dispatcher,
 		scrapeMgr:          scrape.NewManager(orgScraper, cfg.GitHub.Orgs),
 		evaluator:          health.NewStatusEvaluator(),
@@ -98,7 +114,7 @@ func NewRuntime(cfg *config.Config, orgScraper scrape.OrgScraper, logger ...*zap
 }
 
 // Store exposes the runtime store.
-func (r *Runtime) Store() *store.MemoryStore {
+func (r *Runtime) Store() runtimeStore {
 	return r.store
 }
 
@@ -216,22 +232,30 @@ func (r *Runtime) RunLeaderCycle(ctx context.Context) error {
 	cycleStart := time.Now()
 	r.logger.Debug("leader scrape cycle started", zap.Time("now", now), zap.Int("org_count", len(r.cfg.GitHub.Orgs)))
 
+	if r.shouldSkipGitHubScrape(now) {
+		return r.runCooldownCycle(now)
+	}
+
 	outcomes := r.scrapeMgr.ScrapeAll(ctx)
 
 	var resultErr error
-	githubHealthy := true
 	orgFailures := 0
 	metricsWritten := 0
 	metricsFailed := 0
 	backfillEnqueued := 0
+	storeWriteSuccess := 0
+	storeWriteFailure := 0
 
 	if len(outcomes) == 0 {
 		r.logger.Debug("leader scrape cycle produced no outcomes")
 	}
 	for _, outcome := range outcomes {
 		if outcome.Err != nil {
+			r.recordLeaderCycleMetricBestEffort(now, "gh_exporter_scrape_runs_total", 1, map[string]string{
+				"org":    outcome.Org,
+				"result": "failure",
+			})
 			r.logger.Warn("organization scrape failed", zap.String("org", outcome.Org), zap.Error(outcome.Err))
-			githubHealthy = false
 			orgFailures++
 			if resultErr == nil {
 				resultErr = outcome.Err
@@ -248,9 +272,29 @@ func (r *Runtime) RunLeaderCycle(ctx context.Context) error {
 			})
 			if enqueueResult.Published {
 				backfillEnqueued++
+				r.recordLeaderCycleMetricBestEffort(now, "gh_exporter_backfill_jobs_enqueued_total", 1, map[string]string{
+					"org":    outcome.Org,
+					"reason": "scrape_error",
+				})
+			}
+			if enqueueResult.DedupSuppressed {
+				r.recordLeaderCycleMetricBestEffort(now, "gh_exporter_backfill_jobs_deduped_total", 1, map[string]string{
+					"org":    outcome.Org,
+					"reason": "scrape_error",
+				})
+			}
+			if enqueueResult.DroppedByRateLimit {
+				r.recordLeaderCycleMetricBestEffort(now, "gh_exporter_backfill_enqueues_dropped_total", 1, map[string]string{
+					"org":    outcome.Org,
+					"reason": "org_rate_cap",
+				})
 			}
 			continue
 		}
+		r.recordLeaderCycleMetricBestEffort(now, "gh_exporter_scrape_runs_total", 1, map[string]string{
+			"org":    outcome.Org,
+			"result": "success",
+		})
 		r.logger.Debug("organization scrape succeeded", zap.String("org", outcome.Org), zap.Int("metric_points", len(outcome.Result.Metrics)))
 		r.logger.Debug(
 			"organization scrape summary",
@@ -303,11 +347,23 @@ func (r *Runtime) RunLeaderCycle(ctx context.Context) error {
 			})
 			if enqueueResult.Published {
 				backfillEnqueued++
+				r.recordLeaderCycleMetricBestEffort(now, "gh_exporter_backfill_jobs_enqueued_total", 1, map[string]string{
+					"org":    messageOrg,
+					"reason": reason,
+				})
 			}
 			if enqueueResult.DedupSuppressed {
+				r.recordLeaderCycleMetricBestEffort(now, "gh_exporter_backfill_jobs_deduped_total", 1, map[string]string{
+					"org":    messageOrg,
+					"reason": reason,
+				})
 				r.logger.Debug("backfill message dedup-suppressed", zap.String("org", messageOrg), zap.String("repo", messageRepo), zap.String("reason", reason))
 			}
 			if enqueueResult.DroppedByRateLimit {
+				r.recordLeaderCycleMetricBestEffort(now, "gh_exporter_backfill_enqueues_dropped_total", 1, map[string]string{
+					"org":    messageOrg,
+					"reason": "org_rate_cap",
+				})
 				r.logger.Warn("backfill message dropped by dispatcher rate limit", zap.String("org", messageOrg), zap.String("repo", messageRepo), zap.String("reason", reason))
 			}
 		}
@@ -319,6 +375,7 @@ func (r *Runtime) RunLeaderCycle(ctx context.Context) error {
 			if err := r.store.UpsertMetric(store.RoleLeader, store.SourceLeaderScrape, metric); err != nil {
 				r.logger.Warn("failed to upsert leader metric", zap.String("org", outcome.Org), zap.String("metric", metric.Name), zap.Error(err))
 				metricsFailed++
+				storeWriteFailure++
 				if resultErr == nil {
 					resultErr = err
 				} else {
@@ -327,6 +384,7 @@ func (r *Runtime) RunLeaderCycle(ctx context.Context) error {
 				continue
 			}
 			metricsWritten++
+			storeWriteSuccess++
 		}
 	}
 	if err := r.recordLeaderCycleMetric(now, "gh_exporter_leader_cycle_last_run_unixtime", float64(now.Unix()), nil); err != nil {
@@ -337,10 +395,25 @@ func (r *Runtime) RunLeaderCycle(ctx context.Context) error {
 			resultErr = errors.Join(resultErr, err)
 		}
 	}
+	r.recordLeaderCycleMetricBestEffort(now, "gh_exporter_store_write_total", float64(storeWriteSuccess), map[string]string{
+		"source": string(store.SourceLeaderScrape),
+		"result": "success",
+	})
+	r.recordLeaderCycleMetricBestEffort(now, "gh_exporter_store_write_total", float64(storeWriteFailure), map[string]string{
+		"source": string(store.SourceLeaderScrape),
+		"result": "failure",
+	})
 
 	r.mu.Lock()
-	r.githubHealthy = githubHealthy
+	r.updateGitHubHealthLocked(now, orgFailures == 0)
 	r.mu.Unlock()
+	r.mu.RLock()
+	currentGitHubHealthy := r.githubHealthy
+	r.mu.RUnlock()
+
+	r.recordDependencyHealthMetrics(now)
+	r.store.GC(now)
+
 	r.logger.Info(
 		"leader scrape cycle completed",
 		zap.Int("orgs_scraped", len(outcomes)),
@@ -349,7 +422,7 @@ func (r *Runtime) RunLeaderCycle(ctx context.Context) error {
 		zap.Int("metrics_failed", metricsFailed),
 		zap.Int("backfill_enqueued", backfillEnqueued),
 		zap.Int("queue_depth", r.queue.Depth()),
-		zap.Bool("github_healthy", githubHealthy),
+		zap.Bool("github_healthy", currentGitHubHealthy),
 		zap.Duration("duration", time.Since(cycleStart)),
 	)
 	return resultErr
@@ -385,8 +458,16 @@ func (r *Runtime) runFollowerLoop(ctx context.Context) {
 	if maxAge <= 0 {
 		maxAge = 24 * time.Hour
 	}
+	lockTTL := r.cfg.Backfill.DedupTTL
+	if lockTTL <= 0 {
+		lockTTL = maxAge
+	}
 
 	r.queue.Consume(ctx, func(msg backfill.Message) error {
+		if msg.JobID != "" && !r.store.AcquireJobLock(msg.JobID, lockTTL, r.Now()) {
+			r.logger.Debug("follower skipped duplicate backfill message", zap.String("job_id", msg.JobID))
+			return nil
+		}
 		err := r.store.UpsertMetric(store.RoleFollower, store.SourceWorkerBackfill, store.MetricPoint{
 			Name: "gh_exporter_backfill_jobs_processed_total",
 			Labels: map[string]string{
@@ -398,9 +479,17 @@ func (r *Runtime) runFollowerLoop(ctx context.Context) {
 			UpdatedAt: r.Now(),
 		})
 		if err != nil {
+			r.recordFollowerMetricBestEffort(r.Now(), "gh_exporter_store_write_total", 1, map[string]string{
+				"source": string(store.SourceWorkerBackfill),
+				"result": "failure",
+			})
 			r.logger.Warn("follower failed to persist backfill metric", zap.String("org", msg.Org), zap.String("repo", msg.Repo), zap.Error(err))
 			return err
 		}
+		r.recordFollowerMetricBestEffort(r.Now(), "gh_exporter_store_write_total", 1, map[string]string{
+			"source": string(store.SourceWorkerBackfill),
+			"result": "success",
+		})
 		r.logger.Debug("follower processed backfill message", zap.String("org", msg.Org), zap.String("repo", msg.Repo), zap.Int("queue_depth", r.queue.Depth()))
 		return nil
 	}, maxAge, r.Now)
@@ -425,4 +514,150 @@ func (r *Runtime) recordLeaderCycleMetric(now time.Time, name string, value floa
 		Value:     value,
 		UpdatedAt: now,
 	})
+}
+
+func (r *Runtime) recordFollowerMetric(now time.Time, name string, value float64, labels map[string]string) error {
+	return r.store.UpsertMetric(store.RoleFollower, store.SourceWorkerBackfill, store.MetricPoint{
+		Name:      name,
+		Labels:    labels,
+		Value:     value,
+		UpdatedAt: now,
+	})
+}
+
+func (r *Runtime) recordLeaderCycleMetricBestEffort(
+	now time.Time,
+	name string,
+	value float64,
+	labels map[string]string,
+) {
+	if err := r.recordLeaderCycleMetric(now, name, value, labels); err != nil {
+		r.logger.Warn(
+			"failed to persist leader operational metric",
+			zap.String("metric", name),
+			zap.Error(err),
+		)
+	}
+}
+
+func (r *Runtime) recordFollowerMetricBestEffort(
+	now time.Time,
+	name string,
+	value float64,
+	labels map[string]string,
+) {
+	if err := r.recordFollowerMetric(now, name, value, labels); err != nil {
+		r.logger.Warn(
+			"failed to persist follower operational metric",
+			zap.String("metric", name),
+			zap.Error(err),
+		)
+	}
+}
+
+func (r *Runtime) shouldSkipGitHubScrape(now time.Time) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return !r.githubCooldownUntil.IsZero() && now.Before(r.githubCooldownUntil)
+}
+
+func (r *Runtime) runCooldownCycle(now time.Time) error {
+	for _, org := range r.cfg.GitHub.Orgs {
+		r.recordLeaderCycleMetricBestEffort(now, "gh_exporter_scrape_runs_total", 1, map[string]string{
+			"org":    org.Org,
+			"result": "skipped_unhealthy",
+		})
+		enqueueResult := r.dispatcher.EnqueueMissing(backfill.MessageInput{
+			Org:         org.Org,
+			Repo:        "*",
+			WindowStart: now,
+			WindowEnd:   now,
+			Reason:      "github_unhealthy",
+			Now:         now,
+		})
+		if enqueueResult.Published {
+			r.recordLeaderCycleMetricBestEffort(now, "gh_exporter_backfill_jobs_enqueued_total", 1, map[string]string{
+				"org":    org.Org,
+				"reason": "github_unhealthy",
+			})
+		}
+		if enqueueResult.DedupSuppressed {
+			r.recordLeaderCycleMetricBestEffort(now, "gh_exporter_backfill_jobs_deduped_total", 1, map[string]string{
+				"org":    org.Org,
+				"reason": "github_unhealthy",
+			})
+		}
+		if enqueueResult.DroppedByRateLimit {
+			r.recordLeaderCycleMetricBestEffort(now, "gh_exporter_backfill_enqueues_dropped_total", 1, map[string]string{
+				"org":    org.Org,
+				"reason": "org_rate_cap",
+			})
+		}
+	}
+
+	r.recordLeaderCycleMetricBestEffort(now, "gh_exporter_leader_cycle_last_run_unixtime", float64(now.Unix()), nil)
+	r.recordDependencyHealthMetrics(now)
+	r.store.GC(now)
+	return nil
+}
+
+func (r *Runtime) updateGitHubHealthLocked(now time.Time, cycleSuccessful bool) {
+	threshold := r.cfg.GitHub.UnhealthyFailureThreshold
+	if threshold <= 0 {
+		threshold = 1
+	}
+	cooldown := r.cfg.GitHub.UnhealthyCooldown
+	if cooldown <= 0 {
+		cooldown = time.Minute
+	}
+	recoverThreshold := r.cfg.Health.GitHubRecoverSuccessThreshold
+	if recoverThreshold <= 0 {
+		recoverThreshold = 1
+	}
+
+	if cycleSuccessful {
+		r.githubFailureStreak = 0
+		if r.githubHealthy {
+			r.githubRecoverStreak = 0
+			r.githubCooldownUntil = time.Time{}
+			return
+		}
+		r.githubRecoverStreak++
+		if r.githubRecoverStreak >= recoverThreshold {
+			r.githubHealthy = true
+			r.githubRecoverStreak = 0
+			r.githubCooldownUntil = time.Time{}
+		}
+		return
+	}
+
+	r.githubRecoverStreak = 0
+	r.githubFailureStreak++
+	if r.githubFailureStreak >= threshold {
+		r.githubHealthy = false
+		r.githubCooldownUntil = now.Add(cooldown)
+	}
+}
+
+func (r *Runtime) recordDependencyHealthMetrics(now time.Time) {
+	r.mu.RLock()
+	components := map[string]bool{
+		"redis":     r.redisHealthy,
+		"amqp":      r.amqpHealthy,
+		"scheduler": r.schedulerHealthy,
+		"github":    r.githubHealthy,
+		"consumer":  r.consumerHealthy,
+		"exporter":  r.exporterHealthy,
+	}
+	r.mu.RUnlock()
+
+	for dependency, healthy := range components {
+		value := 0.0
+		if healthy {
+			value = 1
+		}
+		r.recordLeaderCycleMetricBestEffort(now, "gh_exporter_dependency_health", value, map[string]string{
+			"dependency": dependency,
+		})
+	}
 }

@@ -14,18 +14,18 @@ As GitHub Copilot, you are an expert in Kubernetes deployments, with deep knowle
 ### **1. Pods**
 - **Principle:** The smallest deployable unit in Kubernetes. Represents a single instance of a running process in your cluster.
 - **Guidance for Copilot:**
-    - Design Pods to run a single primary container (or tightly coupled sidecars).
-    - Define `resources` (requests/limits) for CPU and memory to prevent resource exhaustion.
-    - Implement `livenessProbe` and `readinessProbe` for health checks.
+  - Design Pods to run a single primary container (or tightly coupled sidecars).
+  - Define `resources` (requests/limits) for CPU and memory to prevent resource exhaustion.
+  - Implement `livenessProbe` and `readinessProbe` for health checks.
 - **Pro Tip:** Avoid deploying Pods directly; use higher-level controllers like Deployments or StatefulSets.
 
 ### **2. Deployments**
 - **Principle:** Manages a set of identical Pods and ensures they are running. Handles rolling updates and rollbacks.
 - **Guidance for Copilot:**
-    - Use Deployments for stateless applications.
-    - Define desired replicas (`replicas`).
-    - Specify `selector` and `template` for Pod matching.
-    - Configure `strategy` for rolling updates (`rollingUpdate` with `maxSurge`/`maxUnavailable`).
+  - Use Deployments for stateless applications.
+  - Define desired replicas (`replicas`).
+  - Specify `selector` and `template` for Pod matching.
+  - Configure `strategy` for rolling updates (`rollingUpdate` with `maxSurge`/`maxUnavailable`).
 - **Example (Simple Deployment):**
 ```yaml
 apiVersion: apps/v1
@@ -73,17 +73,17 @@ spec:
 ### **3. Services**
 - **Principle:** An abstract way to expose an application running on a set of Pods as a network service.
 - **Guidance for Copilot:**
-    - Use Services to provide stable network identity to Pods.
-    - Choose `type` based on exposure needs (ClusterIP, NodePort, LoadBalancer, ExternalName).
-    - Ensure `selector` matches Pod labels for proper routing.
+  - Use Services to provide stable network identity to Pods.
+  - Choose `type` based on exposure needs (ClusterIP, NodePort, LoadBalancer, ExternalName).
+  - Ensure `selector` matches Pod labels for proper routing.
 - **Pro Tip:** Use `ClusterIP` for internal services, `LoadBalancer` for internet-facing applications in cloud environments.
 
 ### **4. Ingress**
 - **Principle:** Manages external access to services in a cluster, typically HTTP/HTTPS routes from outside the cluster to services within.
 - **Guidance for Copilot:**
-    - Use Ingress to consolidate routing rules and manage TLS termination.
-    - Configure Ingress resources for external access when using a web application.
-    - Specify host, path, and backend service.
+  - Use Ingress to consolidate routing rules and manage TLS termination.
+  - Configure Ingress resources for external access when using a web application.
+  - Specify host, path, and backend service.
 - **Example (Ingress):**
 ```yaml
 apiVersion: networking.k8s.io/v1
@@ -113,16 +113,16 @@ spec:
 ### **1. ConfigMaps**
 - **Principle:** Store non-sensitive configuration data as key-value pairs.
 - **Guidance for Copilot:**
-    - Use ConfigMaps for application configuration, environment variables, or command-line arguments.
-    - Mount ConfigMaps as files in Pods or inject as environment variables.
+  - Use ConfigMaps for application configuration, environment variables, or command-line arguments.
+  - Mount ConfigMaps as files in Pods or inject as environment variables.
 - **Caution:** ConfigMaps are not encrypted at rest. Do NOT store sensitive data here.
 
 ### **2. Secrets**
 - **Principle:** Store sensitive data securely.
 - **Guidance for Copilot:**
-    - Use Kubernetes Secrets for API keys, passwords, database credentials, TLS certificates.
-    - Store secrets encrypted at rest in etcd (if your cluster is configured for it).
-    - Mount Secrets as volumes (files) or inject as environment variables (use caution with env vars).
+  - Use Kubernetes Secrets for API keys, passwords, database credentials, TLS certificates.
+  - Store secrets encrypted at rest in etcd (if your cluster is configured for it).
+  - Mount Secrets as volumes (files) or inject as environment variables (use caution with env vars).
 - **Pro Tip:** For production, integrate with external secret managers (e.g., HashiCorp Vault, AWS Secrets Manager, Azure Key Vault) using external Secrets operators (e.g., External Secrets Operator).
 
 ## Health Checks and Probes
@@ -142,9 +142,9 @@ spec:
 ### **1. Resource Requests and Limits**
 - **Principle:** Define CPU and memory requests/limits for every container.
 - **Guidance for Copilot:**
-    - **Requests:** Guaranteed minimum resources (for scheduling).
-    - **Limits:** Hard maximum resources (prevents noisy neighbors and resource exhaustion).
-    - Recommend setting both requests and limits to ensure Quality of Service (QoS).
+  - **Requests:** Guaranteed minimum resources (for scheduling).
+  - **Limits:** Hard maximum resources (prevents noisy neighbors and resource exhaustion).
+  - Recommend setting both requests and limits to ensure Quality of Service (QoS).
 - **QoS Classes:** Learn about `Guaranteed`, `Burstable`, and `BestEffort`.
 
 ### **2. Horizontal Pod Autoscaler (HPA)**
@@ -170,10 +170,10 @@ spec:
 ### **3. Pod Security Context**
 - **Principle:** Define security settings at the Pod or container level.
 - **Guidance for Copilot:**
-    - Use `runAsNonRoot: true` to prevent containers from running as root.
-    - Set `allowPrivilegeEscalation: false`.
-    - Use `readOnlyRootFilesystem: true` where possible.
-    - Drop unneeded capabilities (`capabilities: drop: [ALL]`).
+  - Use `runAsNonRoot: true` to prevent containers from running as root.
+  - Set `allowPrivilegeEscalation: false`.
+  - Use `readOnlyRootFilesystem: true` where possible.
+  - Drop unneeded capabilities (`capabilities: drop: [ALL]`).
 - **Example (Pod Security Context):**
 ```yaml
 spec:
@@ -195,9 +195,9 @@ spec:
 ### **4. Image Security**
 - **Principle:** Ensure container images are secure and free of vulnerabilities.
 - **Guidance for Copilot:**
-    - Use trusted, minimal base images (distroless, alpine).
-    - Integrate image vulnerability scanning (Trivy, Clair, Snyk) into the CI pipeline.
-    - Implement image signing and verification.
+  - Use trusted, minimal base images (distroless, alpine).
+  - Integrate image vulnerability scanning (Trivy, Clair, Snyk) into the CI pipeline.
+  - Implement image signing and verification.
 
 ### **5. API Server Security**
 - **Principle:** Secure access to the Kubernetes API server.
@@ -208,21 +208,21 @@ spec:
 ### **1. Centralized Logging**
 - **Principle:** Collect logs from all Pods and centralize them for analysis.
 - **Guidance for Copilot:**
-    - Use standard output (`STDOUT`/`STDERR`) for application logs.
-    - Deploy a logging agent (e.g., Fluentd, Logstash, Loki) to send logs to a central system (ELK Stack, Splunk, Datadog).
+  - Use standard output (`STDOUT`/`STDERR`) for application logs.
+  - Deploy a logging agent (e.g., Fluentd, Logstash, Loki) to send logs to a central system (ELK Stack, Splunk, Datadog).
 
 ### **2. Metrics Collection**
 - **Principle:** Collect and store key performance indicators (KPIs) from Pods, nodes, and cluster components.
 - **Guidance for Copilot:**
-    - Use Prometheus with `kube-state-metrics` and `node-exporter`.
-    - Define custom metrics using application-specific exporters.
-    - Configure Grafana for visualization.
+  - Use Prometheus with `kube-state-metrics` and `node-exporter`.
+  - Define custom metrics using application-specific exporters.
+  - Configure Grafana for visualization.
 
 ### **3. Alerting**
 - **Principle:** Set up alerts for anomalies and critical events.
 - **Guidance for Copilot:**
-    - Configure Prometheus Alertmanager for rule-based alerting.
-    - Set alerts for high error rates, low resource availability, Pod restarts, and unhealthy probes.
+  - Configure Prometheus Alertmanager for rule-based alerting.
+  - Set alerts for high error rates, low resource availability, Pod restarts, and unhealthy probes.
 
 ### **4. Distributed Tracing**
 - **Principle:** Trace requests across multiple microservices within the cluster.
@@ -304,4 +304,4 @@ Deploying applications on Kubernetes requires a deep understanding of its core c
 
 ---
 
-<!-- End of Kubernetes Deployment Best Practices Instructions --> 
+<!-- End of Kubernetes Deployment Best Practices Instructions -->

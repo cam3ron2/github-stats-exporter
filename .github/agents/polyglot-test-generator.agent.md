@@ -28,7 +28,7 @@ If the request is clear (e.g., "generate tests for this project"), proceed direc
 
 Call the `polyglot-test-researcher` subagent to analyze the codebase:
 
-```
+```go
 runSubagent({
   agent: "polyglot-test-researcher",
   prompt: "Research the codebase at [PATH] for test generation. Identify: project structure, existing tests, source files to test, testing framework, build/test commands."
@@ -41,7 +41,7 @@ The researcher will create `.testagent/research.md` with findings.
 
 Call the `polyglot-test-planner` subagent to create the test plan:
 
-```
+```go
 runSubagent({
   agent: "polyglot-test-planner",
   prompt: "Create a test implementation plan based on the research at .testagent/research.md. Create phased approach with specific files and test cases."
@@ -54,7 +54,7 @@ The planner will create `.testagent/plan.md` with phases.
 
 Read the plan and execute each phase by calling the `polyglot-test-implementer` subagent:
 
-```
+```go
 runSubagent({
   agent: "polyglot-test-implementer",
   prompt: "Implement Phase N from .testagent/plan.md: [phase description]. Ensure tests compile and pass."
@@ -66,6 +66,7 @@ Call the implementer ONCE PER PHASE, sequentially. Wait for each phase to comple
 ### Step 5: Report Results
 
 After all phases are complete:
+
 - Summarize tests created
 - Report any failures or issues
 - Suggest next steps if needed
@@ -73,6 +74,7 @@ After all phases are complete:
 ## State Management
 
 All state is stored in `.testagent/` folder in the workspace:
+
 - `.testagent/research.md` - Research findings
 - `.testagent/plan.md` - Implementation plan
 - `.testagent/status.md` - Progress tracking (optional)

@@ -31,11 +31,27 @@ repos:
     hooks:
       - id: actionlint
         args: ["-config-file", ".github/linters/actionlint.yml"]
-  - repo: https://github.com/DavidAnson/markdownlint-cli2
-    rev: v0.13.0
+  - repo: https://github.com/igorshubovych/markdownlint-cli
+    rev: v0.47.0
     hooks:
-      - id: markdownlint-cli2
+      - id: markdownlint
         args:
+          - --fix
           - --config
           - .github/linters/.markdown-lint.yml
           - .
+  - repo: https://github.com/tekwizely/pre-commit-golang
+    rev: v1.0.0-rc.4
+    hooks:
+      - id: go-build-mod
+      - id: go-mod-tidy
+      - id: go-test-mod
+      - id: go-vet-mod
+  - repo: https://github.com/golangci/golangci-lint
+    rev: v2.10.1
+    hooks:
+      - id: golangci-lint
+        entry: golangci-lint run --new-from-rev HEAD --fix --config .github/linters/.golangci.yml
+        language: golang
+        types: [go]
+        pass_filenames: false

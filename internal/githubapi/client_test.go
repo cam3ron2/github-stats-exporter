@@ -36,10 +36,11 @@ func newResponse(status int, headers map[string]string, body string) *http.Respo
 	for key, value := range headers {
 		header.Set(key, value)
 	}
+	responseBody := io.NopCloser(strings.NewReader(body))
 	return &http.Response{
 		StatusCode: status,
 		Header:     header,
-		Body:       io.NopCloser(strings.NewReader(body)),
+		Body:       responseBody,
 	}
 }
 
@@ -179,6 +180,13 @@ func TestClientDo(t *testing.T) {
 			}
 
 			resp, metadata, callErr := client.Do(req)
+			if resp != nil && resp.Body != nil {
+				t.Cleanup(func() {
+					if closeErr := resp.Body.Close(); closeErr != nil {
+						t.Fatalf("response body close failed: %v", closeErr)
+					}
+				})
+			}
 			if tc.wantErr && callErr == nil {
 				t.Fatalf("Do() expected error, got nil")
 			}

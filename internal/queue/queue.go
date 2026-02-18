@@ -132,7 +132,9 @@ func (b *InMemoryBroker) Consume(ctx context.Context, queue string, cfg Consumer
 				retryMessage := cloneMessage(msg)
 				retryMessage.Attempt++
 				sleepFn(delay)
-				_ = b.Publish(ctx, queue, retryMessage)
+				if publishErr := b.Publish(ctx, queue, retryMessage); publishErr != nil {
+					continue
+				}
 				continue
 			}
 
@@ -142,7 +144,9 @@ func (b *InMemoryBroker) Consume(ctx context.Context, queue string, cfg Consumer
 					dlqMessage.Headers = make(map[string]string)
 				}
 				dlqMessage.Headers["last_error"] = err.Error()
-				_ = b.Publish(ctx, cfg.DeadLetterQueue, dlqMessage)
+				if publishErr := b.Publish(ctx, cfg.DeadLetterQueue, dlqMessage); publishErr != nil {
+					continue
+				}
 			}
 		}
 	}

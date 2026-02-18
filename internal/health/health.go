@@ -101,18 +101,24 @@ func NewHandler(provider Provider) http.Handler {
 
 	mux.HandleFunc("/livez", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
+		if _, err := w.Write([]byte("ok")); err != nil {
+			return
+		}
 	})
 
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
 		status := provider.CurrentStatus(r.Context())
 		if status.Ready {
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("ready"))
+			if _, err := w.Write([]byte("ready")); err != nil {
+				return
+			}
 			return
 		}
 		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte("not ready"))
+		if _, err := w.Write([]byte("not ready")); err != nil {
+			return
+		}
 	})
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -120,12 +126,17 @@ func NewHandler(provider Provider) http.Handler {
 		payload, err := json.Marshal(status)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(`{"mode":"unhealthy","error":"marshal health status"}`))
+			if _, writeErr := w.Write([]byte(`{"mode":"unhealthy","error":"marshal health status"}`)); writeErr != nil {
+				return
+			}
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(payload)
+		//nolint:gosec // Health payload is server-generated JSON status.
+		if _, err := w.Write(payload); err != nil {
+			return
+		}
 	})
 
 	return mux

@@ -220,14 +220,7 @@ func (c *DataClient) ListOrgRepos(ctx context.Context, org string) (OrgReposResu
 		}
 
 		for _, repo := range payload {
-			result.Repos = append(result.Repos, Repository{
-				Name:          repo.Name,
-				FullName:      repo.FullName,
-				DefaultBranch: repo.DefaultBranch,
-				Archived:      repo.Archived,
-				Disabled:      repo.Disabled,
-				Fork:          repo.Fork,
-			})
+			result.Repos = append(result.Repos, Repository(repo))
 		}
 
 		if !hasNextPage(resp.Header.Get("Link")) {

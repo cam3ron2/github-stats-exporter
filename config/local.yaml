@@ -1,11 +1,10 @@
+---
 server:
   listen_addr: ":8080"
   log_level: "debug"
-
 metrics:
   topology: "single_service_target"
   scrape_service_dns: "localhost:8080"
-
 leader_election:
   enabled: false
   namespace: "github-stats"
@@ -13,7 +12,6 @@ leader_election:
   lease_duration: "30s"
   renew_deadline: "20s"
   retry_period: "5s"
-
 github:
   api_base_url: "https://api.github.com"
   request_timeout: "20s"
@@ -27,18 +25,15 @@ github:
       scrape_interval: "5m"
       repo_allowlist: ["*"]
       per_org_concurrency: 4
-
 rate_limit:
   min_remaining_threshold: 200
   min_reset_buffer: "10s"
   secondary_limit_backoff: "60s"
-
 retry:
   max_attempts: 5
   initial_backoff: "2s"
   max_backoff: "30s"
   jitter: true
-
 loc:
   source: "stats_contributors"
   refresh_interval: "24h"
@@ -47,7 +42,6 @@ loc:
   fallback_max_commit_detail_calls_per_org_per_hour: 1000
   large_repo_zero_detection_windows: 2
   large_repo_cooldown: "7d"
-
 backfill:
   enabled: true
   max_message_age: "24h"
@@ -56,13 +50,11 @@ backfill:
   coalesce_window: "15m"
   dedup_ttl: "12h"
   max_enqueues_per_org_per_minute: 100
-
 amqp:
   url: "amqp://githubstats:githubstats@rabbitmq:5672/"
   exchange: "gh.backfill"
   queue: "gh.backfill.jobs"
   dlq: "gh.backfill.dlq"
-
 store:
   backend: "redis"
   redis_mode: "standalone"
@@ -76,11 +68,9 @@ store:
   index_shards: 64
   export_cache_mode: "incremental"
   max_series_budget: 500000
-
 health:
   github_probe_interval: "30s"
   github_recover_success_threshold: 3
-
 telemetry:
   otel_enabled: false
   otel_exporter_otlp_endpoint: ""
