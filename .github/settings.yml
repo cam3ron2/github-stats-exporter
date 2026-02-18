@@ -3,7 +3,7 @@
 repository:
   # See https://docs.github.com/en/rest/repos/repos#update-a-repository for all available settings.
   topics: github, opentelemetry, otel, exporter, metrics, prometheus, activity, productivity, observability
-  description: A scraper and exporter for GitHub metrics
+  description: A service to scrape GitHub activity and export it as Prometheus metrics, written in Go.
   has_issues: true
   has_projects: false
   has_wiki: false
@@ -108,6 +108,10 @@ rulesets:
       - actor_id:
         actor_type: OrganizationAdmin
         bypass_mode: always
+      # Allow GitHub Actions (semantic-release + gitops update jobs) to push to main
+      - actor_id: 15368
+        actor_type: Integration
+        bypass_mode: always
       # Allow deploy keys to bypass pull request reviews for CI
       - actor_id:
         actor_type: DeployKey
@@ -142,6 +146,10 @@ rulesets:
     bypass_actors:
       - actor_id:
         actor_type: OrganizationAdmin
+        bypass_mode: always
+      # Allow GitHub Actions (semantic-release + gitops update jobs) to push to main
+      - actor_id: 15368
+        actor_type: Integration
         bypass_mode: always
       - actor_id:
         actor_type: DeployKey
