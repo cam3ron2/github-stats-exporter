@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -41,14 +42,16 @@ type runtimeQueue interface {
 
 // Runtime is the application runtime orchestrator.
 type Runtime struct {
-	cfg         *config.Config
-	store       runtimeStore
-	queue       runtimeQueue
-	dispatcher  *backfill.Dispatcher
-	scrapeMgr   *scrape.Manager
-	evaluator   *health.StatusEvaluator
-	logger      *zap.Logger
-	noopScraper bool
+	cfg               *config.Config
+	store             runtimeStore
+	queue             runtimeQueue
+	dispatcher        *backfill.Dispatcher
+	scrapeMgr         *scrape.Manager
+	evaluator         *health.StatusEvaluator
+	logger            *zap.Logger
+	noopScraper       bool
+	githubProbeURL    string
+	githubProbeClient *http.Client
 
 	mu                  sync.RWMutex
 	role                health.Role
@@ -106,8 +109,12 @@ func NewRuntime(cfg *config.Config, orgScraper scrape.OrgScraper, logger ...*zap
 		DedupTTL:                   cfg.Backfill.DedupTTL,
 		MaxEnqueuesPerOrgPerMinute: cfg.Backfill.MaxEnqueuesPerOrgPerMinute,
 	}, queueBackend, storeBackend)
+	probeTimeout := cfg.GitHub.RequestTimeout
+	if probeTimeout <= 0 {
+		probeTimeout = 20 * time.Second
+	}
 
-	return &Runtime{
+	runtime := &Runtime{
 		cfg:                cfg,
 		store:              storeBackend,
 		queue:              queueBackend,
@@ -124,6 +131,9 @@ func NewRuntime(cfg *config.Config, orgScraper scrape.OrgScraper, logger ...*zap
 		githubClientUsable: true,
 		Now:                time.Now,
 	}
+	runtime.githubProbeURL = buildGitHubMetaProbeURL(cfg.GitHub.APIBaseURL)
+	runtime.githubProbeClient = &http.Client{Timeout: probeTimeout}
+	return runtime
 }
 
 // Store exposes the runtime store.
@@ -726,11 +736,53 @@ func (r *Runtime) startDependencyProbeLoop(ctx context.Context) {
 func (r *Runtime) probeDependencies(ctx context.Context) {
 	redisHealthy := r.store.Healthy(ctx)
 	amqpHealthy := r.queue.Healthy(ctx)
+	githubHealthy := r.probeGitHubAPI(ctx)
 
 	r.mu.Lock()
 	r.redisHealthy = redisHealthy
 	r.amqpHealthy = amqpHealthy
+	r.updateGitHubHealthLocked(r.Now(), githubHealthy)
 	r.mu.Unlock()
+}
+
+func buildGitHubMetaProbeURL(apiBaseURL string) string {
+	trimmed := strings.TrimSpace(apiBaseURL)
+	if trimmed == "" {
+		return ""
+	}
+
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return ""
+	}
+
+	parsed.Path = strings.TrimRight(parsed.Path, "/") + "/meta"
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
+}
+
+func (r *Runtime) probeGitHubAPI(ctx context.Context) bool {
+	if r == nil || r.githubProbeClient == nil || strings.TrimSpace(r.githubProbeURL) == "" {
+		return true
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.githubProbeURL, nil)
+	if err != nil {
+		return false
+	}
+	//nolint:gosec // Probe URL is parsed/validated from configuration via buildGitHubMetaProbeURL.
+	resp, err := r.githubProbeClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	// Treat 4xx responses as dependency reachable; 5xx indicates dependency degradation.
+	return resp.StatusCode < http.StatusInternalServerError
 }
 
 func (r *Runtime) leaderInterval() time.Duration {

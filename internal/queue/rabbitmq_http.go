@@ -491,6 +491,9 @@ func (b *RabbitMQHTTPBroker) declareExchange(ctx context.Context) error {
 }
 
 func (b *RabbitMQHTTPBroker) declareQueue(ctx context.Context, queueName string, arguments map[string]any) error {
+	if arguments == nil {
+		arguments = map[string]any{}
+	}
 	endpoint := fmt.Sprintf("%s/api/queues/%s/%s", b.baseURL, b.vhostEncoded, url.PathEscape(queueName))
 	body := map[string]any{
 		"durable":     true,

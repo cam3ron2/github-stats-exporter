@@ -557,6 +557,7 @@ deploy/kustomize/
       patch-config.yaml
       patch-app-hardening.yaml
       redis-sentinel.yaml
+      redis-replicas-statefulset.yaml
       networkpolicy.yaml
 ```
 
@@ -1130,6 +1131,7 @@ kind: Kustomization
 resources:
   - ../../base
   - redis-sentinel.yaml
+  - redis-replicas-statefulset.yaml
   - networkpolicy.yaml
 patchesStrategicMerge:
   - patch-scale.yaml
@@ -1150,13 +1152,6 @@ spec:
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: redis
-spec:
-  replicas: 3
----
-apiVersion: apps/v1
-kind: StatefulSet
-metadata:
   name: rabbitmq
 spec:
   replicas: 3
@@ -1167,6 +1162,49 @@ metadata:
   name: github-stats
 spec:
   minAvailable: 2
+```
+
+`overlays/prod/redis-replicas-statefulset.yaml`:
+
+```yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-replica
+  labels:
+    app: redis
+    role: replica
+spec:
+  serviceName: redis
+  replicas: 2
+  selector:
+    matchLabels:
+      app: redis
+      role: replica
+  template:
+    metadata:
+      labels:
+        app: redis
+        role: replica
+    spec:
+      containers:
+        - name: redis
+          image: redis:7.2-alpine
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              exec redis-server \
+                --appendonly yes \
+                --replicaof redis-0.redis.github-stats.svc.cluster.local 6379
+          ports:
+            - name: redis
+              containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
 ```
 
 `overlays/prod/patch-config.yaml`:
@@ -1349,7 +1387,9 @@ kind: NetworkPolicy
 metadata:
   name: github-stats-default-deny
 spec:
-  podSelector: {}
+  podSelector:
+    matchLabels:
+      app: github-stats
   policyTypes: ["Ingress", "Egress"]
 ---
 apiVersion: networking.k8s.io/v1
@@ -1407,6 +1447,10 @@ scrape_configs:
       - targets:
           - github-stats-metrics.github-stats.svc.cluster.local:8080
 ```
+
+Prometheus recording/alert rules:
+
+- `deploy/prometheus/github-stats-alert-rules.yaml`
 
 ## 16. Local Development Compose (App + Redis + RabbitMQ)
 
@@ -1475,6 +1519,8 @@ services:
   - dropped backfill enqueues due to org safety caps
   - store/queue dependency failures
 - Runbook documents incident actions for GitHub outage, Redis outage, AMQP outage.
+- Compose functional resilience check script exists and passes (`scripts/compose-functional-check.sh`).
+- Export path load benchmark exists and is documented (`internal/exporter/openmetrics_benchmark_test.go`, `docs/load_and_resilience_validation.md`).
 
 ## 18. Pre-Init GitHub Issue Backlog
 

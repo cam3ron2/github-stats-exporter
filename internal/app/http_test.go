@@ -57,3 +57,49 @@ func TestNewHTTPHandler(t *testing.T) {
 		})
 	}
 }
+
+func TestWrapHTTPHandlerByTraceMode(t *testing.T) {
+	t.Parallel()
+
+	base := &staticHandler{}
+
+	testCases := []struct {
+		name        string
+		traceMode   string
+		wantWrapped bool
+	}{
+		{
+			name:        "trace_off",
+			traceMode:   "off",
+			wantWrapped: false,
+		},
+		{
+			name:        "trace_sampled",
+			traceMode:   "sampled",
+			wantWrapped: true,
+		},
+		{
+			name:        "trace_detailed",
+			traceMode:   "detailed",
+			wantWrapped: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			wrapped := wrapHTTPHandler(tc.traceMode, "metrics", base)
+			gotWrapped := wrapped != base
+			if gotWrapped != tc.wantWrapped {
+				t.Fatalf("wrapped = %t, want %t", gotWrapped, tc.wantWrapped)
+			}
+		})
+	}
+}
+
+type staticHandler struct{}
+
+func (h *staticHandler) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusNoContent)
+}

@@ -1,0 +1,3 @@
+# Gitleaks ignore list (fingerprints)
+# Format: path:rule-id:line
+scripts/compose-functional-check.sh:curl-auth-user:27

@@ -4,6 +4,7 @@ kind: Kustomization
 resources:
   - ../../base
   - redis-sentinel.yaml
+  - redis-replicas-statefulset.yaml
   - networkpolicy.yaml
 patchesStrategicMerge:
   - patch-scale.yaml

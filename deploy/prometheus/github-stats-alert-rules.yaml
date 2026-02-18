@@ -1,0 +1,58 @@
+---
+groups:
+  - name: github-stats.recording
+    rules:
+      - record: gh_activity_commits_24h_by_org_user
+        expr: sum by (org, user) (gh_activity_commits_24h)
+      - record: gh_activity_prs_merged_24h_by_org_user
+        expr: sum by (org, user) (gh_activity_prs_merged_24h)
+      - record: gh_activity_reviews_submitted_24h_by_org_user
+        expr: sum by (org, user) (gh_activity_reviews_submitted_24h)
+  - name: github-stats.alerts
+    rules:
+      - alert: GitHubStatsDependencyUnhealthy
+        expr: gh_exporter_dependency_health{dependency=~"redis|amqp"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: github-stats dependency unhealthy
+          description: |
+            Dependency {{ $labels.dependency }} has been unhealthy for over 5 minutes.
+      - alert: GitHubStatsGitHubAPIDegraded
+        expr: gh_exporter_dependency_health{dependency="github"} == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: github-stats GitHub API degraded
+          description: |
+            GitHub API dependency health has been degraded for over 10 minutes.
+      - alert: GitHubStatsQueueBacklogAgeHigh
+        expr: gh_exporter_queue_oldest_message_age_seconds{queue="gh.backfill.jobs"} > 900
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: github-stats backfill queue backlog age is high
+          description: |
+            Oldest backfill message age has exceeded 15 minutes.
+      - alert: GitHubStatsBackfillEnqueueDrops
+        expr: increase(gh_exporter_backfill_enqueues_dropped_total[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: github-stats dropped backfill enqueue events detected
+          description: |
+            Backfill enqueue events are being dropped by safety caps.
+      - alert: GitHubStatsGitHubRateLimitLow
+        expr: gh_exporter_github_rate_limit_remaining < 500
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: github-stats GitHub app rate limit is low
+          description: |
+            Rate limit remaining for org={{ $labels.org }} installation_id={{ $labels.installation_id }}
+            has stayed below 500 for more than 15 minutes.

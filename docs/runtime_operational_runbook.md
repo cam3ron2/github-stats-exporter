@@ -45,6 +45,10 @@
 - `gh_exporter_dependency_health{dependency}`
 - `/healthz` JSON mode + component statuses
 
+Alert and recording rule source:
+
+- `deploy/prometheus/github-stats-alert-rules.yaml`
+
 ## Quick Verification Commands (Compose)
 
 ```bash

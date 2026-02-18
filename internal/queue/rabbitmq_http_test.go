@@ -384,6 +384,107 @@ func TestRabbitMQHTTPBrokerEnsureTopology(t *testing.T) {
 	}
 }
 
+func TestRabbitMQHTTPBrokerEnsureTopologyQueueArguments(t *testing.T) {
+	t.Parallel()
+
+	var (
+		mu          sync.Mutex
+		queueBodies = make(map[string]map[string]any)
+	)
+	client := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Method == http.MethodPut && strings.HasPrefix(req.URL.EscapedPath(), "/api/queues/%2F/") {
+				defer req.Body.Close()
+				payload := make(map[string]any)
+				if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+					return jsonResponse(http.StatusBadRequest, map[string]any{"error": err.Error()}), nil
+				}
+				mu.Lock()
+				queueBodies[req.URL.EscapedPath()] = payload
+				mu.Unlock()
+			}
+			return jsonResponse(http.StatusCreated, map[string]any{}), nil
+		}),
+	}
+
+	broker, err := NewRabbitMQHTTPBroker(RabbitMQHTTPConfig{
+		ManagementURL: "http://rabbitmq.local",
+		VHost:         "/",
+		Exchange:      "gh.backfill",
+		HTTPClient:    client,
+	})
+	if err != nil {
+		t.Fatalf("NewRabbitMQHTTPBroker() unexpected error: %v", err)
+	}
+
+	err = broker.EnsureTopology(context.Background(), TopologyConfig{
+		MainQueue:       "gh.backfill.jobs",
+		DeadLetterQueue: "gh.backfill.dlq",
+		RetryQueues: []RetryQueueSpec{
+			{Name: "gh.backfill.jobs.retry.1m0s", Delay: time.Minute},
+		},
+	})
+	if err != nil {
+		t.Fatalf("EnsureTopology() unexpected error: %v", err)
+	}
+
+	testCases := []struct {
+		path             string
+		wantMessageTTL   float64
+		wantDLX          string
+		wantDLRoutingKey string
+	}{
+		{
+			path: "/api/queues/%2F/gh.backfill.jobs",
+		},
+		{
+			path: "/api/queues/%2F/gh.backfill.dlq",
+		},
+		{
+			path:             "/api/queues/%2F/gh.backfill.jobs.retry.1m0s",
+			wantMessageTTL:   60000,
+			wantDLX:          "gh.backfill",
+			wantDLRoutingKey: "gh.backfill.jobs",
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.path, func(t *testing.T) {
+			t.Parallel()
+
+			mu.Lock()
+			body, ok := queueBodies[tc.path]
+			mu.Unlock()
+			if !ok {
+				t.Fatalf("missing queue declaration body for %s", tc.path)
+			}
+
+			arguments, ok := body["arguments"].(map[string]any)
+			if !ok {
+				t.Fatalf("arguments type = %T, want map[string]any", body["arguments"])
+			}
+
+			if tc.wantMessageTTL == 0 {
+				if len(arguments) != 0 {
+					t.Fatalf("arguments len = %d, want 0", len(arguments))
+				}
+				return
+			}
+
+			if got := arguments["x-message-ttl"]; got != tc.wantMessageTTL {
+				t.Fatalf("x-message-ttl = %v, want %v", got, tc.wantMessageTTL)
+			}
+			if got := arguments["x-dead-letter-exchange"]; got != tc.wantDLX {
+				t.Fatalf("x-dead-letter-exchange = %v, want %v", got, tc.wantDLX)
+			}
+			if got := arguments["x-dead-letter-routing-key"]; got != tc.wantDLRoutingKey {
+				t.Fatalf("x-dead-letter-routing-key = %v, want %v", got, tc.wantDLRoutingKey)
+			}
+		})
+	}
+}
+
 func TestRabbitMQHTTPBrokerHealth(t *testing.T) {
 	t.Parallel()
 

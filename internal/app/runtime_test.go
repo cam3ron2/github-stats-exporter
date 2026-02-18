@@ -3,6 +3,9 @@ package app
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -186,6 +189,54 @@ func TestRuntimeProbeDependenciesUpdatesHealth(t *testing.T) {
 	if !status.Components["amqp"] {
 		t.Fatalf("amqp component health = false, want true")
 	}
+}
+
+func TestRuntimeProbeDependenciesChecksGitHubAPIHealth(t *testing.T) {
+	t.Parallel()
+
+	statusCode := http.StatusServiceUnavailable
+
+	cfg := testConfig()
+	cfg.GitHub.APIBaseURL = "https://api.github.local"
+	cfg.GitHub.UnhealthyFailureThreshold = 1
+	cfg.GitHub.UnhealthyCooldown = time.Minute
+	cfg.Health.GitHubRecoverSuccessThreshold = 1
+
+	runtime := NewRuntime(cfg, &fakeOrgScraper{})
+	runtime.githubProbeClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Path != "/meta" {
+				return &http.Response{
+					StatusCode: http.StatusNotFound,
+					Body:       io.NopCloser(strings.NewReader("not found")),
+					Header:     http.Header{},
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: statusCode,
+				Body:       io.NopCloser(strings.NewReader(http.StatusText(statusCode))),
+				Header:     http.Header{},
+			}, nil
+		}),
+	}
+	runtime.probeDependencies(context.Background())
+	status := runtime.CurrentStatus(context.Background())
+	if status.Components["github_healthy"] {
+		t.Fatalf("github_healthy component = true, want false")
+	}
+
+	statusCode = http.StatusOK
+	runtime.probeDependencies(context.Background())
+	status = runtime.CurrentStatus(context.Background())
+	if !status.Components["github_healthy"] {
+		t.Fatalf("github_healthy component = false, want true")
+	}
+}
+
+type roundTripFunc func(req *http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
 }
 
 func TestRuntimeRunLeaderCycleWritesInternalMetricsWithoutActivity(t *testing.T) {
