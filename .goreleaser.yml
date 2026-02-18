@@ -1,0 +1,35 @@
+---
+version: 2
+project_name: github-stats
+before:
+  hooks:
+    - go mod download
+builds:
+  - id: github-stats
+    main: ./cmd/github-stats
+    binary: github-stats
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+archives:
+  - id: github-stats
+    builds:
+      - github-stats
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        format: zip
+checksum:
+  name_template: checksums.txt
+changelog:
+  disable: true

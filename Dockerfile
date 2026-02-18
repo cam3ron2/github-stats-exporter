@@ -17,8 +17,6 @@ USER appuser
 WORKDIR /app
 
 COPY --from=builder /out/github-stats /app/github-stats
-# COPY config /app/config
 
 EXPOSE 8080
 ENTRYPOINT ["/app/github-stats"]
-# CMD ["--config=/app/config/local.yaml"]
