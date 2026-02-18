@@ -5,6 +5,7 @@ metadata:
   name: redis-sentinel
   labels:
     app: redis-sentinel
+    app.kubernetes.io/component: redis
 spec:
   selector:
     app: redis-sentinel
@@ -19,6 +20,7 @@ metadata:
   name: redis-sentinel
   labels:
     app: redis-sentinel
+    app.kubernetes.io/component: redis
 spec:
   replicas: 3
   selector:
@@ -28,6 +30,7 @@ spec:
     metadata:
       labels:
         app: redis-sentinel
+        app.kubernetes.io/component: redis
     spec:
       containers:
         - name: sentinel

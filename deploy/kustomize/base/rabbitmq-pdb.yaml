@@ -3,6 +3,8 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: rabbitmq
+  labels:
+    app.kubernetes.io/component: rabbitmq
 spec:
   minAvailable: 1
   selector:

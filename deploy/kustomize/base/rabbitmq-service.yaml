@@ -5,6 +5,7 @@ metadata:
   name: rabbitmq
   labels:
     app: rabbitmq
+    app.kubernetes.io/component: rabbitmq
 spec:
   clusterIP: None
   selector:

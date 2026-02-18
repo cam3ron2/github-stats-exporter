@@ -3,6 +3,8 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: redis
+  labels:
+    app.kubernetes.io/component: redis
 spec:
   minAvailable: 1
   selector:

@@ -5,6 +5,7 @@ metadata:
   name: redis-replica
   labels:
     app: redis
+    app.kubernetes.io/component: redis
     role: replica
 spec:
   serviceName: redis
@@ -17,6 +18,7 @@ spec:
     metadata:
       labels:
         app: redis
+        app.kubernetes.io/component: redis
         role: replica
     spec:
       containers:

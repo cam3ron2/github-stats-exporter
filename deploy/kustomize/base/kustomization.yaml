@@ -2,6 +2,15 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: github-stats
+labels:
+  - pairs:
+      app.kubernetes.io/name: github-stats
+      app.kubernetes.io/instance: github-stats
+      app.kubernetes.io/version: "0.0.0"
+      app.kubernetes.io/part-of: github-stats
+      app.kubernetes.io/managed-by: kustomize
+    includeSelectors: false
+    includeTemplates: true
 resources:
   - namespace.yaml
   - serviceaccount.yaml

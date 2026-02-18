@@ -5,6 +5,7 @@ metadata:
   name: github-stats
   labels:
     app: github-stats
+    app.kubernetes.io/component: exporter
 spec:
   replicas: 3
   selector:
@@ -14,6 +15,7 @@ spec:
     metadata:
       labels:
         app: github-stats
+        app.kubernetes.io/component: exporter
     spec:
       serviceAccountName: github-stats
       securityContext:

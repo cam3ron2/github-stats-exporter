@@ -1,6 +1,15 @@
 ---
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
+labels:
+  - pairs:
+      app.kubernetes.io/name: github-stats
+      app.kubernetes.io/instance: github-stats
+      app.kubernetes.io/version: "0.0.0"
+      app.kubernetes.io/part-of: github-stats
+      app.kubernetes.io/managed-by: kustomize
+    includeSelectors: false
+    includeTemplates: true
 resources:
   - ../../base
 patchesStrategicMerge:
@@ -9,9 +18,15 @@ patchesStrategicMerge:
 secretGenerator:
   # Copy the example files under secrets/ to the filenames below before deploying.
   - name: github-stats-secrets
+    options:
+      labels:
+        app.kubernetes.io/component: exporter
     files:
       - org-a.pem=secrets/github/org-a.pem
   - name: rabbitmq-secret
+    options:
+      labels:
+        app.kubernetes.io/component: rabbitmq
     files:
       - username=secrets/rabbitmq/username
       - password=secrets/rabbitmq/password

@@ -5,6 +5,7 @@ metadata:
   name: redis
   labels:
     app: redis
+    app.kubernetes.io/component: redis
 spec:
   clusterIP: None
   selector:

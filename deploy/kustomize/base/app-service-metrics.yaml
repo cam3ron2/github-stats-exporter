@@ -5,6 +5,7 @@ metadata:
   name: github-stats-metrics
   labels:
     app: github-stats
+    app.kubernetes.io/component: exporter
 spec:
   selector:
     app: github-stats

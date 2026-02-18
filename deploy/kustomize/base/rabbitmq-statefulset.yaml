@@ -5,6 +5,7 @@ metadata:
   name: rabbitmq
   labels:
     app: rabbitmq
+    app.kubernetes.io/component: rabbitmq
 spec:
   serviceName: rabbitmq
   replicas: 1
@@ -15,6 +16,7 @@ spec:
     metadata:
       labels:
         app: rabbitmq
+        app.kubernetes.io/component: rabbitmq
     spec:
       containers:
         - name: rabbitmq

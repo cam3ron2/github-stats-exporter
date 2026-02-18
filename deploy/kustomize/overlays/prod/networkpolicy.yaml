@@ -3,6 +3,8 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: github-stats-default-deny
+  labels:
+    app.kubernetes.io/component: exporter
 spec:
   podSelector:
     matchLabels:
@@ -13,6 +15,8 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: github-stats-allow-required
+  labels:
+    app.kubernetes.io/component: exporter
 spec:
   podSelector:
     matchLabels:
