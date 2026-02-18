@@ -7,7 +7,7 @@ The `githubapi` package contains GitHub API integration primitives:
 - GitHub App installation authentication via `ghinstallation`.
 - go-github REST client construction with optional Enterprise base URL override.
 - Request execution wrapper with retry and rate-limit-aware pause behavior.
-- Typed REST endpoint client for org repos, contributor stats, commit lists, and commit detail.
+- Typed REST endpoint client for org repos, contributor stats, commits, pull requests, pull reviews, and issue comments.
 - Rate-limit header parsing and decision policy.
 - LOC contributor-stats state machine for ready/warming/stale/fallback transitions.
 
@@ -30,6 +30,12 @@ The `githubapi` package contains GitHub API integration primitives:
 - `RepoCommit`: typed commit list row.
 - `CommitListResult`: typed list-commits payload and metadata.
 - `CommitDetail`: typed commit detail payload and metadata.
+- `PullRequest`: typed pull request row.
+- `PullRequestListResult`: typed list-pull-requests payload and metadata.
+- `PullReview`: typed pull review row.
+- `PullReviewsResult`: typed list-pull-reviews payload and metadata.
+- `IssueComment`: typed issue comment row.
+- `IssueCommentsResult`: typed list-issue-comments payload and metadata.
 - `DataClient`: typed endpoint client built on `Client`.
 - `RateLimitHeaders`: parsed GitHub limit headers.
 - `Decision`: policy decision (`Allow`, `WaitFor`, `Reason`).
@@ -54,5 +60,8 @@ The `githubapi` package contains GitHub API integration primitives:
 - `(*DataClient) GetContributorStats(ctx context.Context, owner, repo string) (ContributorStatsResult, error)`: reads `/stats/contributors` with explicit `202/403/404/409/422` handling.
 - `(*DataClient) ListRepoCommitsWindow(ctx context.Context, owner, repo string, since, until time.Time, maxCommits int) (CommitListResult, error)`: lists commits for a window with pagination and cap support.
 - `(*DataClient) GetCommit(ctx context.Context, owner, repo, sha string) (CommitDetail, error)`: gets commit detail with additions/deletions and typed status handling.
+- `(*DataClient) ListRepoPullRequestsWindow(ctx context.Context, owner, repo string, since, until time.Time) (PullRequestListResult, error)`: lists pull requests and filters to the requested window.
+- `(*DataClient) ListPullReviews(ctx context.Context, owner, repo string, pullNumber int, since, until time.Time) (PullReviewsResult, error)`: lists pull reviews for one PR and filters to the requested window.
+- `(*DataClient) ListIssueCommentsWindow(ctx context.Context, owner, repo string, since, until time.Time) (IssueCommentsResult, error)`: lists repository issue comments and filters to the requested window.
 - `(RateLimitPolicy) Evaluate(headers RateLimitHeaders) Decision`: determines allow/pause behavior from parsed headers.
 - `(LOCStateMachine) Apply(previous LOCState, event LOCEvent) LOCState`: applies LOC state transition rules.

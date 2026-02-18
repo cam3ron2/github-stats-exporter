@@ -16,6 +16,9 @@ type fakeGitHubDataClient struct {
 	listOrgReposFn        func(ctx context.Context, org string) (githubapi.OrgReposResult, error)
 	getContributorStatsFn func(ctx context.Context, owner, repo string) (githubapi.ContributorStatsResult, error)
 	listRepoCommitsFn     func(ctx context.Context, owner, repo string, since, until time.Time, maxCommits int) (githubapi.CommitListResult, error)
+	listRepoPullsFn       func(ctx context.Context, owner, repo string, since, until time.Time) (githubapi.PullRequestListResult, error)
+	listPullReviewsFn     func(ctx context.Context, owner, repo string, pullNumber int, since, until time.Time) (githubapi.PullReviewsResult, error)
+	listIssueCommentsFn   func(ctx context.Context, owner, repo string, since, until time.Time) (githubapi.IssueCommentsResult, error)
 	getCommitFn           func(ctx context.Context, owner, repo, sha string) (githubapi.CommitDetail, error)
 }
 
@@ -37,7 +40,28 @@ func (f *fakeGitHubDataClient) ListRepoCommitsWindow(ctx context.Context, owner,
 	if f.listRepoCommitsFn != nil {
 		return f.listRepoCommitsFn(ctx, owner, repo, since, until, maxCommits)
 	}
-	return githubapi.CommitListResult{}, nil
+	return githubapi.CommitListResult{Status: githubapi.EndpointStatusOK}, nil
+}
+
+func (f *fakeGitHubDataClient) ListRepoPullRequestsWindow(ctx context.Context, owner, repo string, since, until time.Time) (githubapi.PullRequestListResult, error) {
+	if f.listRepoPullsFn != nil {
+		return f.listRepoPullsFn(ctx, owner, repo, since, until)
+	}
+	return githubapi.PullRequestListResult{Status: githubapi.EndpointStatusOK}, nil
+}
+
+func (f *fakeGitHubDataClient) ListPullReviews(ctx context.Context, owner, repo string, pullNumber int, since, until time.Time) (githubapi.PullReviewsResult, error) {
+	if f.listPullReviewsFn != nil {
+		return f.listPullReviewsFn(ctx, owner, repo, pullNumber, since, until)
+	}
+	return githubapi.PullReviewsResult{Status: githubapi.EndpointStatusOK}, nil
+}
+
+func (f *fakeGitHubDataClient) ListIssueCommentsWindow(ctx context.Context, owner, repo string, since, until time.Time) (githubapi.IssueCommentsResult, error) {
+	if f.listIssueCommentsFn != nil {
+		return f.listIssueCommentsFn(ctx, owner, repo, since, until)
+	}
+	return githubapi.IssueCommentsResult{Status: githubapi.EndpointStatusOK}, nil
 }
 
 func (f *fakeGitHubDataClient) GetCommit(ctx context.Context, owner, repo, sha string) (githubapi.CommitDetail, error) {
@@ -424,6 +448,199 @@ func TestGitHubOrgScraperFallbackBudgetCapsCommitDetails(t *testing.T) {
 	}
 	if result.Summary.ReposFallbackTruncated != 1 {
 		t.Fatalf("ReposFallbackTruncated = %d, want 1", result.Summary.ReposFallbackTruncated)
+	}
+}
+
+func TestGitHubOrgScraperActivityMetrics(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1739836800, 0).UTC()
+	client := &fakeGitHubDataClient{
+		listOrgReposFn: func(_ context.Context, _ string) (githubapi.OrgReposResult, error) {
+			return githubapi.OrgReposResult{
+				Status: githubapi.EndpointStatusOK,
+				Repos:  []githubapi.Repository{{Name: "repo-a"}},
+			}, nil
+		},
+		getContributorStatsFn: func(_ context.Context, _, _ string) (githubapi.ContributorStatsResult, error) {
+			return githubapi.ContributorStatsResult{
+				Status: githubapi.EndpointStatusAccepted,
+			}, nil
+		},
+		listRepoCommitsFn: func(_ context.Context, _, _ string, _, _ time.Time, _ int) (githubapi.CommitListResult, error) {
+			return githubapi.CommitListResult{
+				Status: githubapi.EndpointStatusOK,
+				Commits: []githubapi.RepoCommit{
+					{SHA: "sha-1", Author: "alice", CommittedAt: now.Add(-2 * time.Hour)},
+					{SHA: "sha-2", Author: "alice", CommittedAt: now.Add(-3 * time.Hour)},
+					{SHA: "sha-3", Author: "bob", CommittedAt: now.Add(-4 * time.Hour)},
+					{SHA: "sha-4", Committer: "github-actions[bot]", CommittedAt: now.Add(-5 * time.Hour)},
+					{
+						SHA:         "sha-5",
+						AuthorEmail: "12345+janedoe@users.noreply.github.com",
+						CommittedAt: now.Add(-6 * time.Hour),
+					},
+					{
+						SHA:         "sha-6",
+						AuthorName:  "Some Git User",
+						CommittedAt: now.Add(-7 * time.Hour),
+					},
+					{
+						SHA:         "sha-7",
+						AuthorEmail: "platform-engineering@nielseniq.com",
+						CommittedAt: now.Add(-8 * time.Hour),
+					},
+				},
+			}, nil
+		},
+		listRepoPullsFn: func(_ context.Context, _, _ string, _, _ time.Time) (githubapi.PullRequestListResult, error) {
+			return githubapi.PullRequestListResult{
+				Status: githubapi.EndpointStatusOK,
+				PullRequests: []githubapi.PullRequest{
+					{Number: 101, User: "alice", CreatedAt: now.Add(-2 * time.Hour)},
+					{Number: 102, User: "bob", MergedAt: now.Add(-90 * time.Minute)},
+				},
+			}, nil
+		},
+		listPullReviewsFn: func(_ context.Context, _, _ string, pullNumber int, _, _ time.Time) (githubapi.PullReviewsResult, error) {
+			if pullNumber == 101 {
+				return githubapi.PullReviewsResult{
+					Status: githubapi.EndpointStatusOK,
+					Reviews: []githubapi.PullReview{
+						{ID: 1, User: "carol", SubmittedAt: now.Add(-30 * time.Minute), State: "APPROVED"},
+					},
+				}, nil
+			}
+			return githubapi.PullReviewsResult{
+				Status: githubapi.EndpointStatusOK,
+				Reviews: []githubapi.PullReview{
+					{ID: 2, User: "carol", SubmittedAt: now.Add(-20 * time.Minute), State: "COMMENTED"},
+				},
+			}, nil
+		},
+		listIssueCommentsFn: func(_ context.Context, _, _ string, _, _ time.Time) (githubapi.IssueCommentsResult, error) {
+			return githubapi.IssueCommentsResult{
+				Status: githubapi.EndpointStatusOK,
+				Comments: []githubapi.IssueComment{
+					{ID: 11, User: "dave", CreatedAt: now.Add(-10 * time.Minute)},
+				},
+			}, nil
+		},
+	}
+
+	scraper := NewGitHubOrgScraper(map[string]GitHubDataClient{
+		"org-a": client,
+	}, GitHubOrgScraperConfig{
+		Now: func() time.Time { return now },
+	})
+
+	result, err := scraper.ScrapeOrg(context.Background(), config.GitHubOrgConfig{
+		Org:               "org-a",
+		PerOrgConcurrency: 1,
+	})
+	if err != nil {
+		t.Fatalf("ScrapeOrg() unexpected error: %v", err)
+	}
+
+	commitsAlice := findMetric(result.Metrics, MetricActivityCommits24h, "org-a", "repo-a", "alice")
+	if commitsAlice == nil || commitsAlice.Value != 2 {
+		t.Fatalf("alice commits metric = %#v, want 2", commitsAlice)
+	}
+	commitsBob := findMetric(result.Metrics, MetricActivityCommits24h, "org-a", "repo-a", "bob")
+	if commitsBob == nil || commitsBob.Value != 1 {
+		t.Fatalf("bob commits metric = %#v, want 1", commitsBob)
+	}
+	commitsBot := findMetric(result.Metrics, MetricActivityCommits24h, "org-a", "repo-a", "github-actions[bot]")
+	if commitsBot == nil || commitsBot.Value != 1 {
+		t.Fatalf("bot commits metric = %#v, want 1", commitsBot)
+	}
+	commitsInferred := findMetric(result.Metrics, MetricActivityCommits24h, "org-a", "repo-a", "janedoe")
+	if commitsInferred == nil || commitsInferred.Value != 1 {
+		t.Fatalf("inferred commits metric = %#v, want 1", commitsInferred)
+	}
+	commitsUnlinked := findMetric(result.Metrics, MetricActivityCommits24h, "org-a", "repo-a", "unlinked_git_author")
+	if commitsUnlinked == nil || commitsUnlinked.Value != 1 {
+		t.Fatalf("unlinked commits metric = %#v, want 1", commitsUnlinked)
+	}
+	commitsEmailResolved := findMetric(result.Metrics, MetricActivityCommits24h, "org-a", "repo-a", "platform-engineering")
+	if commitsEmailResolved == nil || commitsEmailResolved.Value != 1 {
+		t.Fatalf("email-resolved commits metric = %#v, want 1", commitsEmailResolved)
+	}
+	prsOpened := findMetric(result.Metrics, MetricActivityPROpened24h, "org-a", "repo-a", "alice")
+	if prsOpened == nil || prsOpened.Value != 1 {
+		t.Fatalf("prs opened metric = %#v, want 1", prsOpened)
+	}
+	prsMerged := findMetric(result.Metrics, MetricActivityPRMerged24h, "org-a", "repo-a", "bob")
+	if prsMerged == nil || prsMerged.Value != 1 {
+		t.Fatalf("prs merged metric = %#v, want 1", prsMerged)
+	}
+	reviews := findMetric(result.Metrics, MetricActivityReviewsSubmitted24h, "org-a", "repo-a", "carol")
+	if reviews == nil || reviews.Value != 2 {
+		t.Fatalf("reviews metric = %#v, want 2", reviews)
+	}
+	comments := findMetric(result.Metrics, MetricActivityIssueComments24h, "org-a", "repo-a", "dave")
+	if comments == nil || comments.Value != 1 {
+		t.Fatalf("issue comments metric = %#v, want 1", comments)
+	}
+}
+
+func TestGitHubOrgScraperActivityEndpointFailureQueuesMissedWindow(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1739836800, 0).UTC()
+	client := &fakeGitHubDataClient{
+		listOrgReposFn: func(_ context.Context, _ string) (githubapi.OrgReposResult, error) {
+			return githubapi.OrgReposResult{
+				Status: githubapi.EndpointStatusOK,
+				Repos:  []githubapi.Repository{{Name: "repo-a"}},
+			}, nil
+		},
+		getContributorStatsFn: func(_ context.Context, _, _ string) (githubapi.ContributorStatsResult, error) {
+			return githubapi.ContributorStatsResult{Status: githubapi.EndpointStatusAccepted}, nil
+		},
+		listRepoCommitsFn: func(_ context.Context, _, _ string, _, _ time.Time, _ int) (githubapi.CommitListResult, error) {
+			return githubapi.CommitListResult{
+				Status: githubapi.EndpointStatusForbidden,
+			}, nil
+		},
+		listRepoPullsFn: func(_ context.Context, _, _ string, _, _ time.Time) (githubapi.PullRequestListResult, error) {
+			return githubapi.PullRequestListResult{
+				Status: githubapi.EndpointStatusOK,
+				PullRequests: []githubapi.PullRequest{
+					{Number: 101, User: "alice", CreatedAt: now.Add(-time.Hour)},
+				},
+			}, nil
+		},
+		listPullReviewsFn: func(_ context.Context, _, _ string, _ int, _, _ time.Time) (githubapi.PullReviewsResult, error) {
+			return githubapi.PullReviewsResult{
+				Status: githubapi.EndpointStatusOK,
+			}, nil
+		},
+		listIssueCommentsFn: func(_ context.Context, _, _ string, _, _ time.Time) (githubapi.IssueCommentsResult, error) {
+			return githubapi.IssueCommentsResult{
+				Status: githubapi.EndpointStatusOK,
+			}, nil
+		},
+	}
+
+	scraper := NewGitHubOrgScraper(map[string]GitHubDataClient{
+		"org-a": client,
+	}, GitHubOrgScraperConfig{
+		Now: func() time.Time { return now },
+	})
+
+	result, err := scraper.ScrapeOrg(context.Background(), config.GitHubOrgConfig{
+		Org:               "org-a",
+		PerOrgConcurrency: 1,
+	})
+	if err != nil {
+		t.Fatalf("ScrapeOrg() unexpected error: %v", err)
+	}
+	if len(result.MissedWindow) == 0 {
+		t.Fatalf("expected missed windows for activity failure, got 0")
+	}
+	if findMetric(result.Metrics, MetricActivityPROpened24h, "org-a", "repo-a", "alice") == nil {
+		t.Fatalf("expected PR opened metric despite commit activity failure")
 	}
 }
 

@@ -355,6 +355,268 @@ func TestDataClientGetCommit(t *testing.T) {
 	}
 }
 
+func TestDataClientListRepoPullRequestsWindow(t *testing.T) {
+	t.Parallel()
+
+	since := time.Unix(1739836800, 0).UTC()
+	until := since.Add(24 * time.Hour)
+	doer := &fakeDoer{
+		responses: []*http.Response{
+			newResponse(http.StatusOK, map[string]string{
+				"Link": `<https://api.github.com/repos/test/repo-a/pulls?per_page=100&page=2>; rel="next"`,
+			}, `[
+				{"number":101,"user":{"login":"alice"},"created_at":"2025-02-18T01:00:00Z","updated_at":"2025-02-18T02:00:00Z","merged_at":"2025-02-18T03:00:00Z"},
+				{"number":102,"user":{"login":"bob"},"created_at":"2025-02-10T01:00:00Z","updated_at":"2025-02-10T02:00:00Z","merged_at":null}
+			]`),
+			newResponse(http.StatusOK, map[string]string{}, `[
+				{"number":103,"user":{"login":"carol"},"created_at":"2025-02-18T04:00:00Z","updated_at":"2025-02-18T05:00:00Z","merged_at":null}
+			]`),
+		},
+	}
+	client, err := NewDataClient("", newTestRequestClient(doer))
+	if err != nil {
+		t.Fatalf("NewDataClient() unexpected error: %v", err)
+	}
+
+	got, err := client.ListRepoPullRequestsWindow(context.Background(), "test", "repo-a", since, until)
+	if err != nil {
+		t.Fatalf("ListRepoPullRequestsWindow() unexpected error: %v", err)
+	}
+	if got.Status != EndpointStatusOK {
+		t.Fatalf("Status = %q, want %q", got.Status, EndpointStatusOK)
+	}
+	if len(got.PullRequests) != 2 {
+		t.Fatalf("len(PullRequests) = %d, want 2", len(got.PullRequests))
+	}
+	if got.PullRequests[0].Number != 101 || got.PullRequests[1].Number != 103 {
+		t.Fatalf("pull requests = %#v, want numbers [101 103]", got.PullRequests)
+	}
+}
+
+func TestDataClientListRepoPullRequestsWindowStatusHandling(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name       string
+		statusCode int
+		wantStatus EndpointStatus
+	}{
+		{name: "forbidden", statusCode: http.StatusForbidden, wantStatus: EndpointStatusForbidden},
+		{name: "not_found", statusCode: http.StatusNotFound, wantStatus: EndpointStatusNotFound},
+		{name: "conflict", statusCode: http.StatusConflict, wantStatus: EndpointStatusConflict},
+		{name: "unprocessable", statusCode: http.StatusUnprocessableEntity, wantStatus: EndpointStatusUnprocessable},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			doer := &fakeDoer{
+				responses: []*http.Response{
+					newResponse(tc.statusCode, map[string]string{}, `{"message":"nope"}`),
+				},
+			}
+			client, err := NewDataClient("", newTestRequestClient(doer))
+			if err != nil {
+				t.Fatalf("NewDataClient() unexpected error: %v", err)
+			}
+
+			got, err := client.ListRepoPullRequestsWindow(
+				context.Background(),
+				"test",
+				"repo-a",
+				time.Unix(1739836800, 0).UTC(),
+				time.Unix(1739836800, 0).UTC().Add(24*time.Hour),
+			)
+			if err != nil {
+				t.Fatalf("ListRepoPullRequestsWindow() unexpected error: %v", err)
+			}
+			if got.Status != tc.wantStatus {
+				t.Fatalf("Status = %q, want %q", got.Status, tc.wantStatus)
+			}
+			if len(got.PullRequests) != 0 {
+				t.Fatalf("len(PullRequests) = %d, want 0", len(got.PullRequests))
+			}
+		})
+	}
+}
+
+func TestDataClientListPullReviews(t *testing.T) {
+	t.Parallel()
+
+	since := time.Unix(1739836800, 0).UTC()
+	until := since.Add(24 * time.Hour)
+	doer := &fakeDoer{
+		responses: []*http.Response{
+			newResponse(http.StatusOK, map[string]string{
+				"Link": `<https://api.github.com/repos/test/repo-a/pulls/101/reviews?per_page=100&page=2>; rel="next"`,
+			}, `[
+				{"id":1,"user":{"login":"alice"},"state":"APPROVED","submitted_at":"2025-02-18T01:00:00Z"},
+				{"id":2,"user":{"login":"bob"},"state":"COMMENTED","submitted_at":"2025-02-10T01:00:00Z"}
+			]`),
+			newResponse(http.StatusOK, map[string]string{}, `[
+				{"id":3,"user":{"login":"carol"},"state":"CHANGES_REQUESTED","submitted_at":"2025-02-18T02:00:00Z"}
+			]`),
+		},
+	}
+	client, err := NewDataClient("", newTestRequestClient(doer))
+	if err != nil {
+		t.Fatalf("NewDataClient() unexpected error: %v", err)
+	}
+
+	got, err := client.ListPullReviews(context.Background(), "test", "repo-a", 101, since, until)
+	if err != nil {
+		t.Fatalf("ListPullReviews() unexpected error: %v", err)
+	}
+	if got.Status != EndpointStatusOK {
+		t.Fatalf("Status = %q, want %q", got.Status, EndpointStatusOK)
+	}
+	if len(got.Reviews) != 2 {
+		t.Fatalf("len(Reviews) = %d, want 2", len(got.Reviews))
+	}
+	if got.Reviews[0].User != "alice" || got.Reviews[1].User != "carol" {
+		t.Fatalf("reviews = %#v, want users [alice carol]", got.Reviews)
+	}
+}
+
+func TestDataClientListPullReviewsStatusHandling(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name       string
+		statusCode int
+		wantStatus EndpointStatus
+	}{
+		{name: "forbidden", statusCode: http.StatusForbidden, wantStatus: EndpointStatusForbidden},
+		{name: "not_found", statusCode: http.StatusNotFound, wantStatus: EndpointStatusNotFound},
+		{name: "conflict", statusCode: http.StatusConflict, wantStatus: EndpointStatusConflict},
+		{name: "unprocessable", statusCode: http.StatusUnprocessableEntity, wantStatus: EndpointStatusUnprocessable},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			doer := &fakeDoer{
+				responses: []*http.Response{
+					newResponse(tc.statusCode, map[string]string{}, `{"message":"nope"}`),
+				},
+			}
+			client, err := NewDataClient("", newTestRequestClient(doer))
+			if err != nil {
+				t.Fatalf("NewDataClient() unexpected error: %v", err)
+			}
+
+			got, err := client.ListPullReviews(
+				context.Background(),
+				"test",
+				"repo-a",
+				101,
+				time.Unix(1739836800, 0).UTC(),
+				time.Unix(1739836800, 0).UTC().Add(24*time.Hour),
+			)
+			if err != nil {
+				t.Fatalf("ListPullReviews() unexpected error: %v", err)
+			}
+			if got.Status != tc.wantStatus {
+				t.Fatalf("Status = %q, want %q", got.Status, tc.wantStatus)
+			}
+			if len(got.Reviews) != 0 {
+				t.Fatalf("len(Reviews) = %d, want 0", len(got.Reviews))
+			}
+		})
+	}
+}
+
+func TestDataClientListIssueCommentsWindow(t *testing.T) {
+	t.Parallel()
+
+	since := time.Unix(1739836800, 0).UTC()
+	until := since.Add(24 * time.Hour)
+	doer := &fakeDoer{
+		responses: []*http.Response{
+			newResponse(http.StatusOK, map[string]string{
+				"Link": `<https://api.github.com/repos/test/repo-a/issues/comments?per_page=100&page=2>; rel="next"`,
+			}, `[
+				{"id":11,"user":{"login":"alice"},"created_at":"2025-02-18T01:00:00Z"},
+				{"id":12,"user":{"login":"bob"},"created_at":"2025-02-10T01:00:00Z"}
+			]`),
+			newResponse(http.StatusOK, map[string]string{}, `[
+				{"id":13,"user":{"login":"carol"},"created_at":"2025-02-18T03:00:00Z"}
+			]`),
+		},
+	}
+	client, err := NewDataClient("", newTestRequestClient(doer))
+	if err != nil {
+		t.Fatalf("NewDataClient() unexpected error: %v", err)
+	}
+
+	got, err := client.ListIssueCommentsWindow(context.Background(), "test", "repo-a", since, until)
+	if err != nil {
+		t.Fatalf("ListIssueCommentsWindow() unexpected error: %v", err)
+	}
+	if got.Status != EndpointStatusOK {
+		t.Fatalf("Status = %q, want %q", got.Status, EndpointStatusOK)
+	}
+	if len(got.Comments) != 2 {
+		t.Fatalf("len(Comments) = %d, want 2", len(got.Comments))
+	}
+	if got.Comments[0].User != "alice" || got.Comments[1].User != "carol" {
+		t.Fatalf("comments = %#v, want users [alice carol]", got.Comments)
+	}
+}
+
+func TestDataClientListIssueCommentsWindowStatusHandling(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name       string
+		statusCode int
+		wantStatus EndpointStatus
+	}{
+		{name: "forbidden", statusCode: http.StatusForbidden, wantStatus: EndpointStatusForbidden},
+		{name: "not_found", statusCode: http.StatusNotFound, wantStatus: EndpointStatusNotFound},
+		{name: "conflict", statusCode: http.StatusConflict, wantStatus: EndpointStatusConflict},
+		{name: "unprocessable", statusCode: http.StatusUnprocessableEntity, wantStatus: EndpointStatusUnprocessable},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			doer := &fakeDoer{
+				responses: []*http.Response{
+					newResponse(tc.statusCode, map[string]string{}, `{"message":"nope"}`),
+				},
+			}
+			client, err := NewDataClient("", newTestRequestClient(doer))
+			if err != nil {
+				t.Fatalf("NewDataClient() unexpected error: %v", err)
+			}
+
+			got, err := client.ListIssueCommentsWindow(
+				context.Background(),
+				"test",
+				"repo-a",
+				time.Unix(1739836800, 0).UTC(),
+				time.Unix(1739836800, 0).UTC().Add(24*time.Hour),
+			)
+			if err != nil {
+				t.Fatalf("ListIssueCommentsWindow() unexpected error: %v", err)
+			}
+			if got.Status != tc.wantStatus {
+				t.Fatalf("Status = %q, want %q", got.Status, tc.wantStatus)
+			}
+			if len(got.Comments) != 0 {
+				t.Fatalf("len(Comments) = %d, want 0", len(got.Comments))
+			}
+		})
+	}
+}
+
 func TestDataClientHandlesDecodeErrors(t *testing.T) {
 	t.Parallel()
 
@@ -391,6 +653,49 @@ func TestDataClientHandlesDecodeErrors(t *testing.T) {
 			call: func(t *testing.T, client *DataClient) error {
 				t.Helper()
 				_, err := client.GetCommit(context.Background(), "test", "repo", "sha")
+				return err
+			},
+		},
+		{
+			name: "list_pulls_decode_error",
+			call: func(t *testing.T, client *DataClient) error {
+				t.Helper()
+				_, err := client.ListRepoPullRequestsWindow(
+					context.Background(),
+					"test",
+					"repo",
+					time.Now().Add(-time.Hour),
+					time.Now(),
+				)
+				return err
+			},
+		},
+		{
+			name: "list_reviews_decode_error",
+			call: func(t *testing.T, client *DataClient) error {
+				t.Helper()
+				_, err := client.ListPullReviews(
+					context.Background(),
+					"test",
+					"repo",
+					123,
+					time.Now().Add(-time.Hour),
+					time.Now(),
+				)
+				return err
+			},
+		},
+		{
+			name: "list_issue_comments_decode_error",
+			call: func(t *testing.T, client *DataClient) error {
+				t.Helper()
+				_, err := client.ListIssueCommentsWindow(
+					context.Background(),
+					"test",
+					"repo",
+					time.Now().Add(-time.Hour),
+					time.Now(),
+				)
 				return err
 			},
 		},

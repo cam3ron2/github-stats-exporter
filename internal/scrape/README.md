@@ -7,6 +7,7 @@ The `scrape` package coordinates per-organization scrape execution and defines t
 - `Manager` runs one scrape per configured org in parallel goroutines.
 - `Outcome` captures result+error per org so failures remain isolated.
 - `GitHubOrgScraper` performs repo iteration per org with bounded worker concurrency.
+- 24h activity metrics are scraped from commits, pull requests, pull reviews, and issue comments endpoints.
 - LOC collection uses `/stats/contributors` as primary and commit-detail fallback when large-repo zeroing is detected.
 - Partial repo failures are returned as missed windows so runtime can enqueue targeted backfill.
 - `NoopOrgScraper` is a safe default implementation used during bootstrap/testing.
