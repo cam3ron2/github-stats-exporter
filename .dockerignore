@@ -15,6 +15,7 @@ deploy/
 docs/
 dist/
 scripts/
+test/
 AGENTS.md
 CHANGELOG.md
 Dockerfile

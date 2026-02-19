@@ -200,10 +200,13 @@ See full details in [docs/internal/release_pipeline.md](docs/internal/release_pi
 # tests
 make test
 
+# deterministic e2e suite (same path used by CI)
+go test -tags=e2e -race -count=1 -timeout 180s ./test/e2e/...
+
 # lint
 make lint
 
-# functional compose checks (requires running stack)
+# compose smoke checks (requires running stack; optional)
 ./scripts/compose-functional-check.sh
 ```
 
