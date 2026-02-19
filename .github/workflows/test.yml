@@ -42,26 +42,33 @@ jobs:
       CI_GITHUB_APP_ORG: ${{ secrets.CI_GITHUB_APP_ORG }}
       CI_GITHUB_APP_ID: ${{ secrets.CI_GITHUB_APP_ID }}
       CI_GITHUB_APP_INSTALLATION_ID: ${{ secrets.CI_GITHUB_APP_INSTALLATION_ID }}
-      CI_GITHUB_APP_PRIVATE_KEY: ${{ secrets.CI_GITHUB_APP_PRIVATE_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Import GPG key
+        uses: crazy-max/ghaction-import-gpg@v6
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.GPG_PASSPHRASE }}
+      - name: Decrypt GitHub App Key
+        run: |
+          mkdir -p config/keys
+          gpg --batch --yes --decrypt \
+            --output config/keys/gh-app-key.pem \
+            config/keys/gh-app-key.gpg
+          chmod 600 config/keys/gh-app-key.pem
       - name: Show Docker versions
         run: |
           docker version
           docker compose version
       - name: Prepare CI GitHub App credentials
         run: |
-          for value_name in CI_GITHUB_APP_ORG CI_GITHUB_APP_ID CI_GITHUB_APP_INSTALLATION_ID CI_GITHUB_APP_PRIVATE_KEY; do
+          for value_name in CI_GITHUB_APP_ORG CI_GITHUB_APP_ID CI_GITHUB_APP_INSTALLATION_ID; do
             if [ -z "${!value_name}" ]; then
               echo "missing required secret: ${value_name}"
               exit 1
             fi
           done
-
-          mkdir -p config/keys
-          printf '%s' "${CI_GITHUB_APP_PRIVATE_KEY}" | sed 's/\\n/\n/g' > config/keys/gh-app-key.pem
-          chmod 600 config/keys/gh-app-key.pem
 
           python3 - <<'PY'
           import os

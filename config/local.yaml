@@ -18,9 +18,9 @@ github:
   unhealthy_failure_threshold: 6
   unhealthy_cooldown: "2m"
   orgs:
-    - org: "niq-ecp-iac"
-      app_id: 1842927
-      installation_id: 82765008
+    - org: "cam3ron2"
+      app_id: 2895538
+      installation_id: 110993278
       private_key_path: "/app/keys/gh-app-key.pem"
       scrape_interval: "5m"
       repo_allowlist: ["*"]

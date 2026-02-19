@@ -6,7 +6,7 @@
 *.so
 *.dylib
 bin
-config/keys/
+config/keys/*.pem
 
 # Test binary, build with `go test -c`
 *.test
