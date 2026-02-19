@@ -202,6 +202,7 @@ clean :
 	$(call rm-command,cover.out)
 	$(call rm-command,.gocache)
 	$(call rm-command,.gomodcache)
+	$(call rm-command,.golangci-cache)
 
 ## Display help for all targets
 .PHONY: help
