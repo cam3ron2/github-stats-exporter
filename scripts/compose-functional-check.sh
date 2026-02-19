@@ -43,6 +43,71 @@ curl_or_fail() {
   printf '%s' "$output"
 }
 
+wait_for_metric_or_fail() {
+  local url="$1"
+  local context="$2"
+  local metric="$3"
+  local timeout_seconds="${4:-120}"
+  local poll_seconds="${5:-2}"
+
+  local start_ts
+  start_ts="$(date +%s)"
+
+  while true; do
+    local output
+    if output="$(curl -fsS "$url" 2>/dev/null)" && grep -Fq -- "$metric" <<<"$output"; then
+      printf '%s' "$output"
+      return 0
+    fi
+
+    local now_ts
+    now_ts="$(date +%s)"
+    if ((now_ts - start_ts >= timeout_seconds)); then
+      echo "[debug] last metrics payload from ${url}:"
+      if [[ -n "${output:-}" ]]; then
+        echo "$output" | tail -n 80
+      else
+        echo "<no payload captured>"
+      fi
+      fail "${context}: expected to find '${metric}' within ${timeout_seconds}s"
+    fi
+
+    sleep "$poll_seconds"
+  done
+}
+
+wait_for_activity_or_fail() {
+  local url="$1"
+  local context="$2"
+  local timeout_seconds="${3:-300}"
+  local poll_seconds="${4:-2}"
+
+  local start_ts
+  start_ts="$(date +%s)"
+
+  while true; do
+    local output
+    if output="$(curl -fsS "$url" 2>/dev/null)" && grep -q '^gh_activity_' <<<"$output"; then
+      printf '%s' "$output"
+      return 0
+    fi
+
+    local now_ts
+    now_ts="$(date +%s)"
+    if ((now_ts - start_ts >= timeout_seconds)); then
+      echo "[debug] last metrics payload from ${url}:"
+      if [[ -n "${output:-}" ]]; then
+        echo "$output" | tail -n 80
+      else
+        echo "<no payload captured>"
+      fi
+      fail "${context}: no gh_activity_ series found within ${timeout_seconds}s"
+    fi
+
+    sleep "$poll_seconds"
+  done
+}
+
 echo "[check] docker compose services"
 docker compose ps
 
@@ -57,13 +122,27 @@ contains_or_fail "$follower_health" '"role":"follower"' "follower health"
 contains_or_fail "$follower_health" '"ready":true' "follower health"
 
 echo "[check] key metrics on leader target"
-leader_metrics="$(curl_or_fail "http://localhost:8080/metrics" "leader metrics")"
+leader_metrics="$(
+  wait_for_metric_or_fail \
+    "http://localhost:8080/metrics" \
+    "leader metrics" \
+    "gh_exporter_dependency_health" \
+    180 \
+    2
+)"
 contains_or_fail "$leader_metrics" 'gh_exporter_dependency_health' "leader metrics"
 contains_or_fail "$leader_metrics" 'gh_exporter_queue_oldest_message_age_seconds' "leader metrics"
 contains_or_fail "$leader_metrics" 'gh_exporter_github_rate_limit_remaining' "leader metrics"
 
 echo "[check] key metrics on follower target"
-follower_metrics="$(curl_or_fail "http://localhost:8081/metrics" "follower metrics")"
+follower_metrics="$(
+  wait_for_metric_or_fail \
+    "http://localhost:8081/metrics" \
+    "follower metrics" \
+    "gh_exporter_dependency_health" \
+    180 \
+    2
+)"
 contains_or_fail "$follower_metrics" 'gh_exporter_dependency_health' "follower metrics"
 contains_or_fail "$follower_metrics" 'gh_exporter_queue_oldest_message_age_seconds' "follower metrics"
 
@@ -101,12 +180,10 @@ echo "[check] business-series consistency across leader/follower targets"
 leader_activity="$(mktemp)"
 follower_activity="$(mktemp)"
 tmp_files+=("$leader_activity" "$follower_activity")
-if ! grep '^gh_activity_' <<<"$leader_metrics" | sort > "$leader_activity"; then
-  fail "leader metrics: no gh_activity_ series found"
-fi
-if ! grep '^gh_activity_' <<<"$follower_metrics" | sort > "$follower_activity"; then
-  fail "follower metrics: no gh_activity_ series found"
-fi
+leader_metrics="$(wait_for_activity_or_fail "http://localhost:8080/metrics" "leader metrics" 300 2)"
+follower_metrics="$(wait_for_activity_or_fail "http://localhost:8081/metrics" "follower metrics" 300 2)"
+grep '^gh_activity_' <<<"$leader_metrics" | sort > "$leader_activity"
+grep '^gh_activity_' <<<"$follower_metrics" | sort > "$follower_activity"
 if ! diff -u "$leader_activity" "$follower_activity" >/dev/null; then
   fail "gh_activity_ series differ between leader and follower targets"
 fi
