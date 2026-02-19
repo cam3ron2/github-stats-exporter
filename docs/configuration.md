@@ -65,6 +65,32 @@ loc:
   large_repo_zero_detection_windows: 2
   large_repo_cooldown: "7d"
 
+copilot:
+  enabled: false
+  scrape_interval: "6h"
+  request_timeout: "30s"
+  download_timeout: "90s"
+  include_org_28d: true
+  include_org_users_28d: false
+  include_enterprise_28d: false
+  include_enterprise_users_28d: false
+  include_breakdown_ide: false
+  include_breakdown_feature: false
+  include_breakdown_language: false
+  include_breakdown_model: false
+  include_pull_request_activity: true
+  user_label_mode: "login"
+  emit_day_label: false
+  max_records_per_report: 0
+  max_users_per_report: 0
+  refresh_if_report_unchanged: false
+  enterprise:
+    enabled: false
+    slug: ""
+    app_id: 0
+    installation_id: 0
+    private_key_path: ""
+
 backfill:
   enabled: true
   max_message_age: "24h"
@@ -195,6 +221,39 @@ telemetry:
 | `backfill.dedup_ttl` | duration | No | runtime fallback `max_message_age` | TTL for dedup/job locks. |
 | `backfill.max_enqueues_per_org_per_minute` | int | No | none | Per-org enqueue rate cap in dispatcher. |
 
+## `copilot`
+
+| Field | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `copilot.enabled` | bool | No | `false` | Enables Copilot usage metric scraping. |
+| `copilot.scrape_interval` | duration | No | load fallback `6h` | Per-scope scrape gate for Copilot report collection. |
+| `copilot.request_timeout` | duration | No | load fallback `30s` | Timeout for report-link endpoint requests. |
+| `copilot.download_timeout` | duration | No | load fallback `90s` | Timeout for signed NDJSON report downloads. |
+| `copilot.include_org_28d` | bool | No | `true` | Scrape org aggregate rolling 28-day report. |
+| `copilot.include_org_users_28d` | bool | No | `false` | Scrape org user-level rolling 28-day report. |
+| `copilot.include_enterprise_28d` | bool | No | `false` | Scrape enterprise aggregate rolling 28-day report. Requires `copilot.enterprise.enabled=true`. |
+| `copilot.include_enterprise_users_28d` | bool | No | `false` | Scrape enterprise user-level rolling 28-day report. Requires `copilot.enterprise.enabled=true`. |
+| `copilot.include_breakdown_ide` | bool | No | `false` | Add optional `ide` label when present in payload. |
+| `copilot.include_breakdown_feature` | bool | No | `false` | Add optional `feature` label when present in payload. |
+| `copilot.include_breakdown_language` | bool | No | `false` | Add optional `language` label when present in payload. |
+| `copilot.include_breakdown_model` | bool | No | `false` | Add optional `model` label when present in payload. |
+| `copilot.include_pull_request_activity` | bool | No | `true` | Include or suppress Copilot pull request activity metrics. |
+| `copilot.user_label_mode` | enum | No | load fallback `login` | `login`, `id`, `hashed`, or `none` for user label privacy/cardinality control. |
+| `copilot.emit_day_label` | bool | No | `false` | Adds `day=YYYY-MM-DD` label when available in report payload. |
+| `copilot.max_records_per_report` | int | No | `0` | Guardrail cap. `0` means unlimited. |
+| `copilot.max_users_per_report` | int | No | `0` | Guardrail cap for user reports. `0` means unlimited. |
+| `copilot.refresh_if_report_unchanged` | bool | No | `false` | If `false`, unchanged report windows are skipped by checkpoint comparison. |
+
+## `copilot.enterprise`
+
+| Field | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `copilot.enterprise.enabled` | bool | No | `false` | Enables enterprise-scope Copilot scraping. |
+| `copilot.enterprise.slug` | string | When enabled | none | Enterprise slug used in enterprise Copilot endpoints. |
+| `copilot.enterprise.app_id` | int64 | When enabled | none | Dedicated GitHub App ID for enterprise Copilot endpoints. |
+| `copilot.enterprise.installation_id` | int64 | When enabled | none | Enterprise installation ID for the app above. |
+| `copilot.enterprise.private_key_path` | string | When enabled | none | PEM private key path for enterprise Copilot app auth. |
+
 ## `amqp`
 
 | Field | Type | Required | Default | Notes |
@@ -254,6 +313,20 @@ telemetry:
   - `loc.fallback_max_commits_per_repo_per_week > 0`
   - `loc.fallback_max_commit_detail_calls_per_org_per_hour > 0`
 - `backfill.requeue_delays` must contain at least one duration.
+- If `copilot.enabled=true`:
+  - `copilot.scrape_interval > 0`
+  - `copilot.request_timeout > 0`
+  - `copilot.download_timeout > 0`
+  - `copilot.user_label_mode` must be one of `login|id|hashed|none`
+  - `copilot.max_records_per_report >= 0`
+  - `copilot.max_users_per_report >= 0`
+- If `copilot.enterprise.enabled=true`:
+  - `copilot.enterprise.slug` must be non-empty
+  - `copilot.enterprise.app_id > 0`
+  - `copilot.enterprise.installation_id > 0`
+  - `copilot.enterprise.private_key_path` must be non-empty
+- If `copilot.enterprise.enabled=false`, `copilot.include_enterprise_28d` and
+  `copilot.include_enterprise_users_28d` are coerced to `false` at config load.
 
 ## Runtime-only environment inputs
 

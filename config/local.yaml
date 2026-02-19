@@ -49,6 +49,31 @@ loc:
   fallback_max_commit_detail_calls_per_org_per_hour: 1000
   large_repo_zero_detection_windows: 2
   large_repo_cooldown: "7d"
+copilot:
+  enabled: false
+  scrape_interval: "6h"
+  request_timeout: "30s"
+  download_timeout: "90s"
+  include_org_28d: true
+  include_org_users_28d: false
+  include_enterprise_28d: false
+  include_enterprise_users_28d: false
+  include_breakdown_ide: false
+  include_breakdown_feature: false
+  include_breakdown_language: false
+  include_breakdown_model: false
+  include_pull_request_activity: true
+  user_label_mode: "login"
+  emit_day_label: false
+  max_records_per_report: 0
+  max_users_per_report: 0
+  refresh_if_report_unchanged: false
+  enterprise:
+    enabled: false
+    slug: ""
+    app_id: 0
+    installation_id: 0
+    private_key_path: ""
 backfill:
   enabled: true
   max_message_age: "24h"

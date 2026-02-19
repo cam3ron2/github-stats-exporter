@@ -98,7 +98,7 @@ jobs:
           echo "gh-app-key-org.pem fingerprint:"
           openssl pkey -in config/keys/gh-app-key-org.pem -pubout -outform DER | sha256sum
       - name: Run live E2E scrape tests
-        run: env -u GOROOT go test -tags='e2e live' -race -v -count=1 -timeout 600s -run '^TestLiveScrapeFromLocalConfig$$' ./test/e2e/...
+        run: env -u GOROOT go test -tags='e2e live' -race -v -count=1 -timeout 600s -run '^TestLive' ./test/e2e/...
       - name: Cleanup decrypted keys
         if: always()
         run: rm -f config/keys/gh-app-key.pem config/keys/gh-app-key-org.pem

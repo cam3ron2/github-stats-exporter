@@ -83,6 +83,104 @@ func TestLiveScrapeFromLocalConfig(t *testing.T) {
 	}
 }
 
+func TestLiveCopilotReportsFromLocalConfig(t *testing.T) {
+	if testing.Short() {
+		t.Skip("live copilot e2e is skipped in short mode")
+	}
+
+	cfg := loadLocalConfigForLiveScrape(t)
+	if !cfg.Copilot.Enabled {
+		t.Skip("config/local.yaml has copilot.enabled=false")
+	}
+	if !cfg.Copilot.IncludeOrg28d && !cfg.Copilot.IncludeOrgUsers28d {
+		t.Skip("config/local.yaml has no org copilot report endpoints enabled")
+	}
+
+	successfulReports := 0
+	for _, orgCfg := range cfg.GitHub.Orgs {
+		orgCfg := orgCfg
+		t.Run(orgCfg.Org, func(t *testing.T) {
+			dataClient := newDataClientForOrg(t, cfg, orgCfg)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+
+			var (
+				streamResult githubapi.CopilotReportStreamResult
+				streamErr    error
+				linkStatus   githubapi.EndpointStatus
+			)
+
+			if cfg.Copilot.IncludeOrgUsers28d {
+				linkResult, err := dataClient.GetOrgCopilotUsers28DayLatestReportLink(ctx, orgCfg.Org)
+				if err == nil && linkResult.Status == githubapi.EndpointStatusOK {
+					linkStatus = linkResult.Status
+					streamResult, streamErr = dataClient.StreamCopilotReportNDJSON(
+						ctx,
+						linkResult.URL,
+						func(_ map[string]any) error { return nil },
+					)
+				} else if err != nil {
+					t.Logf("users report link error: %v", err)
+				} else {
+					t.Logf("users report link status=%s", linkResult.Status)
+				}
+			}
+
+			if streamErr == nil && streamResult.Status == githubapi.EndpointStatusOK && streamResult.RecordsParsed > 0 {
+				successfulReports++
+				return
+			}
+
+			if cfg.Copilot.IncludeOrg28d {
+				linkResult, err := dataClient.GetOrgCopilotOrganization28DayLatestReportLink(ctx, orgCfg.Org)
+				if err != nil {
+					t.Logf("organization report link error: %v", err)
+					return
+				}
+				linkStatus = linkResult.Status
+				if linkResult.Status != githubapi.EndpointStatusOK {
+					t.Logf("organization report link status=%s", linkResult.Status)
+					return
+				}
+				streamResult, streamErr = dataClient.StreamCopilotReportNDJSON(
+					ctx,
+					linkResult.URL,
+					func(_ map[string]any) error { return nil },
+				)
+				if streamErr != nil {
+					t.Logf("organization report stream error: %v", streamErr)
+					return
+				}
+				if streamResult.Status != githubapi.EndpointStatusOK {
+					t.Logf("organization report stream status=%s", streamResult.Status)
+					return
+				}
+				if streamResult.RecordsParsed == 0 {
+					t.Logf("organization report stream parsed zero records")
+					return
+				}
+				successfulReports++
+				return
+			}
+
+			t.Logf(
+				"copilot report unavailable (link_status=%s stream_status=%s records=%d)",
+				linkStatus,
+				streamResult.Status,
+				streamResult.RecordsParsed,
+			)
+		})
+	}
+
+	if successfulReports > 0 {
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("E2E_LIVE_COPILOT_REQUIRED")), "true") {
+		t.Fatalf("no org returned a successful copilot report")
+	}
+	t.Skip("no org returned a successful copilot report; set E2E_LIVE_COPILOT_REQUIRED=true to require success")
+}
+
 func loadLocalConfigForLiveScrape(t *testing.T) *config.Config {
 	t.Helper()
 
@@ -200,32 +298,7 @@ func listOrganizationRepos(
 ) []githubapi.Repository {
 	t.Helper()
 
-	timeout := cfg.GitHub.RequestTimeout
-	if timeout <= 0 {
-		timeout = 20 * time.Second
-	}
-
-	httpClient, err := githubapi.NewInstallationHTTPClient(githubapi.InstallationAuthConfig{
-		AppID:          orgCfg.AppID,
-		InstallationID: orgCfg.InstallationID,
-		PrivateKeyPath: orgCfg.PrivateKeyPath,
-		Timeout:        timeout,
-		BaseTransport:  http.DefaultTransport,
-	})
-	if err != nil {
-		t.Fatalf("create installation client for %q: %v", orgCfg.Org, err)
-	}
-
-	requestClient := githubapi.NewClient(httpClient, githubapi.RetryConfig{
-		MaxAttempts:    1,
-		InitialBackoff: 200 * time.Millisecond,
-		MaxBackoff:     time.Second,
-	}, githubapi.RateLimitPolicy{})
-
-	dataClient, err := githubapi.NewDataClient(cfg.GitHub.APIBaseURL, requestClient)
-	if err != nil {
-		t.Fatalf("create data client for %q: %v", orgCfg.Org, err)
-	}
+	dataClient := newDataClientForOrg(t, cfg, orgCfg)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
@@ -253,6 +326,42 @@ func listOrganizationRepos(
 		)
 	}
 	return reposResult.Repos
+}
+
+func newDataClientForOrg(
+	t *testing.T,
+	cfg *config.Config,
+	orgCfg config.GitHubOrgConfig,
+) *githubapi.DataClient {
+	t.Helper()
+
+	timeout := cfg.GitHub.RequestTimeout
+	if timeout <= 0 {
+		timeout = 20 * time.Second
+	}
+
+	httpClient, err := githubapi.NewInstallationHTTPClient(githubapi.InstallationAuthConfig{
+		AppID:          orgCfg.AppID,
+		InstallationID: orgCfg.InstallationID,
+		PrivateKeyPath: orgCfg.PrivateKeyPath,
+		Timeout:        timeout,
+		BaseTransport:  http.DefaultTransport,
+	})
+	if err != nil {
+		t.Fatalf("create installation client for %q: %v", orgCfg.Org, err)
+	}
+
+	requestClient := githubapi.NewClient(httpClient, githubapi.RetryConfig{
+		MaxAttempts:    1,
+		InitialBackoff: 200 * time.Millisecond,
+		MaxBackoff:     time.Second,
+	}, githubapi.RateLimitPolicy{})
+
+	dataClient, err := githubapi.NewDataClient(cfg.GitHub.APIBaseURL, requestClient)
+	if err != nil {
+		t.Fatalf("create data client for %q: %v", orgCfg.Org, err)
+	}
+	return dataClient
 }
 
 func privateKeyFingerprint(path string) (string, error) {

@@ -35,13 +35,54 @@ func (s *fakeCheckpointStore) GetCheckpoint(org, repo string) (time.Time, bool, 
 }
 
 type fakeGitHubDataClient struct {
-	listOrgReposFn        func(ctx context.Context, org string) (githubapi.OrgReposResult, error)
-	getContributorStatsFn func(ctx context.Context, owner, repo string) (githubapi.ContributorStatsResult, error)
-	listRepoCommitsFn     func(ctx context.Context, owner, repo string, since, until time.Time, maxCommits int) (githubapi.CommitListResult, error)
-	listRepoPullsFn       func(ctx context.Context, owner, repo string, since, until time.Time) (githubapi.PullRequestListResult, error)
-	listPullReviewsFn     func(ctx context.Context, owner, repo string, pullNumber int, since, until time.Time) (githubapi.PullReviewsResult, error)
-	listIssueCommentsFn   func(ctx context.Context, owner, repo string, since, until time.Time) (githubapi.IssueCommentsResult, error)
-	getCommitFn           func(ctx context.Context, owner, repo, sha string) (githubapi.CommitDetail, error)
+	listOrgReposFn                            func(ctx context.Context, org string) (githubapi.OrgReposResult, error)
+	getContributorStatsFn                     func(ctx context.Context, owner, repo string) (githubapi.ContributorStatsResult, error)
+	listRepoCommitsFn                         func(ctx context.Context, owner, repo string, since, until time.Time, maxCommits int) (githubapi.CommitListResult, error)
+	listRepoPullsFn                           func(ctx context.Context, owner, repo string, since, until time.Time) (githubapi.PullRequestListResult, error)
+	listPullReviewsFn                         func(ctx context.Context, owner, repo string, pullNumber int, since, until time.Time) (githubapi.PullReviewsResult, error)
+	listIssueCommentsFn                       func(ctx context.Context, owner, repo string, since, until time.Time) (githubapi.IssueCommentsResult, error)
+	getCommitFn                               func(ctx context.Context, owner, repo, sha string) (githubapi.CommitDetail, error)
+	getOrgCopilotOrganization1DayReportLinkFn func(
+		ctx context.Context,
+		org string,
+		day time.Time,
+	) (githubapi.CopilotReportLinkResult, error)
+	getOrgCopilotOrganization28DayLatestReportLinkFn func(
+		ctx context.Context,
+		org string,
+	) (githubapi.CopilotReportLinkResult, error)
+	getOrgCopilotUsers1DayReportLinkFn func(
+		ctx context.Context,
+		org string,
+		day time.Time,
+	) (githubapi.CopilotReportLinkResult, error)
+	getOrgCopilotUsers28DayLatestReportLinkFn func(
+		ctx context.Context,
+		org string,
+	) (githubapi.CopilotReportLinkResult, error)
+	getEnterpriseCopilotEnterprise1DayReportLinkFn func(
+		ctx context.Context,
+		enterprise string,
+		day time.Time,
+	) (githubapi.CopilotReportLinkResult, error)
+	getEnterpriseCopilotEnterprise28DayLatestReportLinkFn func(
+		ctx context.Context,
+		enterprise string,
+	) (githubapi.CopilotReportLinkResult, error)
+	getEnterpriseCopilotUsers1DayReportLinkFn func(
+		ctx context.Context,
+		enterprise string,
+		day time.Time,
+	) (githubapi.CopilotReportLinkResult, error)
+	getEnterpriseCopilotUsers28DayLatestReportLinkFn func(
+		ctx context.Context,
+		enterprise string,
+	) (githubapi.CopilotReportLinkResult, error)
+	streamCopilotReportNDJSONFn func(
+		ctx context.Context,
+		signedReportURL string,
+		handler func(record map[string]any) error,
+	) (githubapi.CopilotReportStreamResult, error)
 }
 
 func (f *fakeGitHubDataClient) ListOrgRepos(ctx context.Context, org string) (githubapi.OrgReposResult, error) {
@@ -91,6 +132,119 @@ func (f *fakeGitHubDataClient) GetCommit(ctx context.Context, owner, repo, sha s
 		return f.getCommitFn(ctx, owner, repo, sha)
 	}
 	return githubapi.CommitDetail{}, nil
+}
+
+func (f *fakeGitHubDataClient) GetOrgCopilotOrganization1DayReportLink(
+	ctx context.Context,
+	org string,
+	day time.Time,
+) (githubapi.CopilotReportLinkResult, error) {
+	if f.getOrgCopilotOrganization1DayReportLinkFn != nil {
+		return f.getOrgCopilotOrganization1DayReportLinkFn(ctx, org, day)
+	}
+	return githubapi.CopilotReportLinkResult{
+		Status: githubapi.EndpointStatusNotFound,
+	}, nil
+}
+
+func (f *fakeGitHubDataClient) GetOrgCopilotOrganization28DayLatestReportLink(
+	ctx context.Context,
+	org string,
+) (githubapi.CopilotReportLinkResult, error) {
+	if f.getOrgCopilotOrganization28DayLatestReportLinkFn != nil {
+		return f.getOrgCopilotOrganization28DayLatestReportLinkFn(ctx, org)
+	}
+	return githubapi.CopilotReportLinkResult{
+		Status: githubapi.EndpointStatusNotFound,
+	}, nil
+}
+
+func (f *fakeGitHubDataClient) GetOrgCopilotUsers1DayReportLink(
+	ctx context.Context,
+	org string,
+	day time.Time,
+) (githubapi.CopilotReportLinkResult, error) {
+	if f.getOrgCopilotUsers1DayReportLinkFn != nil {
+		return f.getOrgCopilotUsers1DayReportLinkFn(ctx, org, day)
+	}
+	return githubapi.CopilotReportLinkResult{
+		Status: githubapi.EndpointStatusNotFound,
+	}, nil
+}
+
+func (f *fakeGitHubDataClient) GetOrgCopilotUsers28DayLatestReportLink(
+	ctx context.Context,
+	org string,
+) (githubapi.CopilotReportLinkResult, error) {
+	if f.getOrgCopilotUsers28DayLatestReportLinkFn != nil {
+		return f.getOrgCopilotUsers28DayLatestReportLinkFn(ctx, org)
+	}
+	return githubapi.CopilotReportLinkResult{
+		Status: githubapi.EndpointStatusNotFound,
+	}, nil
+}
+
+func (f *fakeGitHubDataClient) GetEnterpriseCopilotEnterprise1DayReportLink(
+	ctx context.Context,
+	enterprise string,
+	day time.Time,
+) (githubapi.CopilotReportLinkResult, error) {
+	if f.getEnterpriseCopilotEnterprise1DayReportLinkFn != nil {
+		return f.getEnterpriseCopilotEnterprise1DayReportLinkFn(ctx, enterprise, day)
+	}
+	return githubapi.CopilotReportLinkResult{
+		Status: githubapi.EndpointStatusNotFound,
+	}, nil
+}
+
+func (f *fakeGitHubDataClient) GetEnterpriseCopilotEnterprise28DayLatestReportLink(
+	ctx context.Context,
+	enterprise string,
+) (githubapi.CopilotReportLinkResult, error) {
+	if f.getEnterpriseCopilotEnterprise28DayLatestReportLinkFn != nil {
+		return f.getEnterpriseCopilotEnterprise28DayLatestReportLinkFn(ctx, enterprise)
+	}
+	return githubapi.CopilotReportLinkResult{
+		Status: githubapi.EndpointStatusNotFound,
+	}, nil
+}
+
+func (f *fakeGitHubDataClient) GetEnterpriseCopilotUsers1DayReportLink(
+	ctx context.Context,
+	enterprise string,
+	day time.Time,
+) (githubapi.CopilotReportLinkResult, error) {
+	if f.getEnterpriseCopilotUsers1DayReportLinkFn != nil {
+		return f.getEnterpriseCopilotUsers1DayReportLinkFn(ctx, enterprise, day)
+	}
+	return githubapi.CopilotReportLinkResult{
+		Status: githubapi.EndpointStatusNotFound,
+	}, nil
+}
+
+func (f *fakeGitHubDataClient) GetEnterpriseCopilotUsers28DayLatestReportLink(
+	ctx context.Context,
+	enterprise string,
+) (githubapi.CopilotReportLinkResult, error) {
+	if f.getEnterpriseCopilotUsers28DayLatestReportLinkFn != nil {
+		return f.getEnterpriseCopilotUsers28DayLatestReportLinkFn(ctx, enterprise)
+	}
+	return githubapi.CopilotReportLinkResult{
+		Status: githubapi.EndpointStatusNotFound,
+	}, nil
+}
+
+func (f *fakeGitHubDataClient) StreamCopilotReportNDJSON(
+	ctx context.Context,
+	signedReportURL string,
+	handler func(record map[string]any) error,
+) (githubapi.CopilotReportStreamResult, error) {
+	if f.streamCopilotReportNDJSONFn != nil {
+		return f.streamCopilotReportNDJSONFn(ctx, signedReportURL, handler)
+	}
+	return githubapi.CopilotReportStreamResult{
+		Status: githubapi.EndpointStatusNotFound,
+	}, nil
 }
 
 func TestGitHubOrgScraperPrimaryStats(t *testing.T) {
