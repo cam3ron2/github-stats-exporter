@@ -35,6 +35,7 @@ jobs:
           FIX_YAML_PRETTIER: true
           FIX_JSON_PRETTIER: true
           FIX_GO_MODULES: true
+          VALIDATE_ALL_CODEBASE: true
           VALIDATE_DOCKERFILE_HADOLINT: true
           VALIDATE_SHELL_SHFMT: true
           VALIDATE_YAML_PRETTIER: true
