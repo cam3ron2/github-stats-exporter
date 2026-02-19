@@ -1,3 +1,10 @@
+## [1.1.1](https://github.com/cam3ron2/github-stats-exporter/compare/v1.1.0...v1.1.1) (2026-02-19)
+
+
+### Bug Fixes
+
+* fix settings and use a github app to facilitate release ([c1b439c](https://github.com/cam3ron2/github-stats-exporter/commit/c1b439c3bbadf69325655f98e52c481df6ef5c0e))
+
 # [1.1.0](https://github.com/cam3ron2/github-stats-exporter/compare/v1.0.0...v1.1.0) (2026-02-19)
 
 
