@@ -43,6 +43,26 @@ curl_or_fail() {
   printf '%s' "$output"
 }
 
+fetch_metrics_pair_or_fail() {
+  local leader_url="$1"
+  local follower_url="$2"
+  local leader_output_file="$3"
+  local follower_output_file="$4"
+  local context="$5"
+
+  curl -fsS "$leader_url" >"$leader_output_file" &
+  local leader_pid=$!
+  curl -fsS "$follower_url" >"$follower_output_file" &
+  local follower_pid=$!
+
+  if ! wait "$leader_pid"; then
+    fail "${context}: leader metrics request failed (${leader_url})"
+  fi
+  if ! wait "$follower_pid"; then
+    fail "${context}: follower metrics request failed (${follower_url})"
+  fi
+}
+
 backfill_queue_depth_from_json() {
   local queues_json="$1"
   python3 -c '
@@ -196,17 +216,45 @@ fi
 echo "[check] business-series consistency across leader/follower targets"
 leader_activity="$(mktemp)"
 follower_activity="$(mktemp)"
-tmp_files+=("$leader_activity" "$follower_activity")
-leader_metrics="$(wait_for_activity_or_fail "http://localhost:8080/metrics" "leader metrics" 300 2)"
-follower_metrics="$(wait_for_activity_or_fail "http://localhost:8081/metrics" "follower metrics" 300 2)"
+leader_metrics_file="$(mktemp)"
+follower_metrics_file="$(mktemp)"
+tmp_files+=("$leader_activity" "$follower_activity" "$leader_metrics_file" "$follower_metrics_file")
+
+activity_ready_timeout_seconds=300
+activity_ready_poll_seconds=2
+activity_ready_start_ts="$(date +%s)"
+while true; do
+  fetch_metrics_pair_or_fail \
+    "http://localhost:8080/metrics" \
+    "http://localhost:8081/metrics" \
+    "$leader_metrics_file" \
+    "$follower_metrics_file" \
+    "business-series consistency fetch"
+  if grep -q '^gh_activity_' "$leader_metrics_file" && grep -q '^gh_activity_' "$follower_metrics_file"; then
+    break
+  fi
+
+  now_ts="$(date +%s)"
+  if (( now_ts - activity_ready_start_ts >= activity_ready_timeout_seconds )); then
+    echo "[debug] last leader metrics payload:"
+    tail -n 80 "$leader_metrics_file"
+    echo "[debug] last follower metrics payload:"
+    tail -n 80 "$follower_metrics_file"
+    fail "no gh_activity_ series found on both targets within ${activity_ready_timeout_seconds}s"
+  fi
+  sleep "$activity_ready_poll_seconds"
+done
+
+leader_metrics="$(cat "$leader_metrics_file")"
+follower_metrics="$(cat "$follower_metrics_file")"
 convergence_timeout_seconds="${GITHUB_STATS_ACTIVITY_CONVERGENCE_TIMEOUT_SECONDS:-60}"
 convergence_poll_seconds="${GITHUB_STATS_ACTIVITY_CONVERGENCE_POLL_SECONDS:-2}"
 convergence_start_ts="$(date +%s)"
 activity_converged=0
 
 while true; do
-  grep '^gh_activity_' <<<"$leader_metrics" | sort > "$leader_activity"
-  grep '^gh_activity_' <<<"$follower_metrics" | sort > "$follower_activity"
+  grep '^gh_activity_' "$leader_metrics_file" | sort > "$leader_activity"
+  grep '^gh_activity_' "$follower_metrics_file" | sort > "$follower_activity"
   if diff -u "$leader_activity" "$follower_activity" >/dev/null; then
     activity_converged=1
     break
@@ -218,8 +266,14 @@ while true; do
   fi
 
   sleep "$convergence_poll_seconds"
-  leader_metrics="$(curl_or_fail "http://localhost:8080/metrics" "leader metrics")"
-  follower_metrics="$(curl_or_fail "http://localhost:8081/metrics" "follower metrics")"
+  fetch_metrics_pair_or_fail \
+    "http://localhost:8080/metrics" \
+    "http://localhost:8081/metrics" \
+    "$leader_metrics_file" \
+    "$follower_metrics_file" \
+    "business-series convergence fetch"
+  leader_metrics="$(cat "$leader_metrics_file")"
+  follower_metrics="$(cat "$follower_metrics_file")"
 done
 
 if (( activity_converged == 0 )); then
