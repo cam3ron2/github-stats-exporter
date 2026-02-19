@@ -69,6 +69,9 @@ type Runtime struct {
 	leaderCancel   context.CancelFunc
 	followerCancel context.CancelFunc
 	probeCancel    context.CancelFunc
+	leaderWG       sync.WaitGroup
+	followerWG     sync.WaitGroup
+	probeWG        sync.WaitGroup
 
 	// Now is injected for deterministic tests.
 	Now func() time.Time
@@ -165,10 +168,22 @@ func (r *Runtime) Handler() http.Handler {
 
 // StartLeader starts leader responsibilities.
 func (r *Runtime) StartLeader(ctx context.Context) {
+	var stopLeader context.CancelFunc
+	var stopFollower context.CancelFunc
+	var stopProbe context.CancelFunc
+
 	r.mu.Lock()
 	if r.followerCancel != nil {
-		r.followerCancel()
+		stopFollower = r.followerCancel
 		r.followerCancel = nil
+	}
+	if r.leaderCancel != nil {
+		stopLeader = r.leaderCancel
+		r.leaderCancel = nil
+	}
+	if r.probeCancel != nil {
+		stopProbe = r.probeCancel
+		r.probeCancel = nil
 	}
 	leaderCtx, cancel := context.WithCancel(ctx)
 	r.leaderCancel = cancel
@@ -177,6 +192,20 @@ func (r *Runtime) StartLeader(ctx context.Context) {
 	r.githubClientUsable = true
 	r.consumerHealthy = false
 	r.mu.Unlock()
+
+	if stopFollower != nil {
+		stopFollower()
+		r.followerWG.Wait()
+	}
+	if stopLeader != nil {
+		stopLeader()
+		r.leaderWG.Wait()
+	}
+	if stopProbe != nil {
+		stopProbe()
+		r.probeWG.Wait()
+	}
+
 	r.startDependencyProbeLoop(ctx)
 	interval := r.leaderInterval()
 	orgCount := len(r.cfg.GitHub.Orgs)
@@ -193,31 +222,60 @@ func (r *Runtime) StartLeader(ctx context.Context) {
 		r.logger.Warn("runtime is using noop scraper; github activity metrics will remain empty until a real scraper is configured")
 	}
 
-	go r.runLeaderLoop(leaderCtx)
+	r.leaderWG.Add(1)
+	go func() {
+		defer r.leaderWG.Done()
+		r.runLeaderLoop(leaderCtx)
+	}()
 }
 
 // StopLeader stops leader responsibilities.
 func (r *Runtime) StopLeader() {
+	var stopLeader context.CancelFunc
+	var stopProbe context.CancelFunc
+
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.leaderCancel != nil {
-		r.leaderCancel()
+		stopLeader = r.leaderCancel
 		r.leaderCancel = nil
 	}
 	if r.probeCancel != nil {
-		r.probeCancel()
+		stopProbe = r.probeCancel
 		r.probeCancel = nil
 	}
 	r.schedulerHealthy = false
+	r.mu.Unlock()
+
+	if stopLeader != nil {
+		stopLeader()
+		r.leaderWG.Wait()
+	}
+	if stopProbe != nil {
+		stopProbe()
+		r.probeWG.Wait()
+	}
+
 	r.logger.Info("stopped leader loop")
 }
 
 // StartFollower starts follower responsibilities.
 func (r *Runtime) StartFollower(ctx context.Context) {
+	var stopLeader context.CancelFunc
+	var stopFollower context.CancelFunc
+	var stopProbe context.CancelFunc
+
 	r.mu.Lock()
 	if r.leaderCancel != nil {
-		r.leaderCancel()
+		stopLeader = r.leaderCancel
 		r.leaderCancel = nil
+	}
+	if r.followerCancel != nil {
+		stopFollower = r.followerCancel
+		r.followerCancel = nil
+	}
+	if r.probeCancel != nil {
+		stopProbe = r.probeCancel
+		r.probeCancel = nil
 	}
 	followerCtx, cancel := context.WithCancel(ctx)
 	r.followerCancel = cancel
@@ -226,6 +284,20 @@ func (r *Runtime) StartFollower(ctx context.Context) {
 	r.githubClientUsable = false
 	r.consumerHealthy = false
 	r.mu.Unlock()
+
+	if stopLeader != nil {
+		stopLeader()
+		r.leaderWG.Wait()
+	}
+	if stopFollower != nil {
+		stopFollower()
+		r.followerWG.Wait()
+	}
+	if stopProbe != nil {
+		stopProbe()
+		r.probeWG.Wait()
+	}
+
 	r.startDependencyProbeLoop(ctx)
 	r.logger.Info(
 		"starting follower loop",
@@ -233,22 +305,39 @@ func (r *Runtime) StartFollower(ctx context.Context) {
 		zap.Duration("max_message_age", r.cfg.Backfill.MaxMessageAge),
 	)
 
-	go r.runFollowerLoop(followerCtx)
+	r.followerWG.Add(1)
+	go func() {
+		defer r.followerWG.Done()
+		r.runFollowerLoop(followerCtx)
+	}()
 }
 
 // StopFollower stops follower responsibilities.
 func (r *Runtime) StopFollower() {
+	var stopFollower context.CancelFunc
+	var stopProbe context.CancelFunc
+
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.followerCancel != nil {
-		r.followerCancel()
+		stopFollower = r.followerCancel
 		r.followerCancel = nil
 	}
 	if r.probeCancel != nil {
-		r.probeCancel()
+		stopProbe = r.probeCancel
 		r.probeCancel = nil
 	}
 	r.consumerHealthy = false
+	r.mu.Unlock()
+
+	if stopFollower != nil {
+		stopFollower()
+		r.followerWG.Wait()
+	}
+	if stopProbe != nil {
+		stopProbe()
+		r.probeWG.Wait()
+	}
+
 	r.logger.Info("stopped follower loop")
 }
 
@@ -484,7 +573,7 @@ func (r *Runtime) processLeaderOutcomes(now time.Time, cycleStart time.Time, out
 	})
 
 	r.mu.Lock()
-	r.updateGitHubHealthLocked(now, orgFailures == 0)
+	r.updateGitHubHealthLocked(r.Now(), orgFailures == 0)
 	r.mu.Unlock()
 	r.mu.RLock()
 	currentGitHubHealthy := r.githubHealthy
@@ -704,20 +793,31 @@ func (r *Runtime) processBackfillMessage(ctx context.Context, msg backfill.Messa
 }
 
 func (r *Runtime) startDependencyProbeLoop(ctx context.Context) {
+	var stopProbe context.CancelFunc
+
 	r.mu.Lock()
 	if r.probeCancel != nil {
-		r.probeCancel()
+		stopProbe = r.probeCancel
+		r.probeCancel = nil
 	}
 	probeCtx, cancel := context.WithCancel(ctx)
 	r.probeCancel = cancel
 	r.mu.Unlock()
+
+	if stopProbe != nil {
+		stopProbe()
+		r.probeWG.Wait()
+	}
 
 	interval := r.cfg.Health.GitHubProbeInterval
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
 
+	r.probeWG.Add(1)
 	go func() {
+		defer r.probeWG.Done()
+
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 

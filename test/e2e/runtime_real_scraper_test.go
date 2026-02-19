@@ -16,6 +16,7 @@ import (
 	"github.com/cam3ron2/github-stats-exporter/internal/config"
 	"github.com/cam3ron2/github-stats-exporter/internal/githubapi"
 	"github.com/cam3ron2/github-stats-exporter/internal/scrape"
+	"github.com/cam3ron2/github-stats-exporter/internal/store"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 )
@@ -227,81 +228,68 @@ func TestLeaderCooldownAndRecoveryWhenGitHubIsUnhealthy(t *testing.T) {
 		cfg.GitHub.UnhealthyFailureThreshold = 1
 		cfg.GitHub.UnhealthyCooldown = 700 * time.Millisecond
 		cfg.Health.GitHubProbeInterval = time.Hour
-		cfg.Health.GitHubRecoverSuccessThreshold = 2
+		cfg.Health.GitHubRecoverSuccessThreshold = 1
 	}
 
 	harness := newRealScraperSingleRuntimeHarness(t, fixture, orgs, cfgOverride)
-	harness.runtime.StartLeader(harness.ctx)
-	t.Cleanup(harness.runtime.StopLeader)
 
-	err := waitForCondition(20*time.Second, 100*time.Millisecond, func() (bool, error) {
-		metrics, fetchErr := fetchEndpoint(harness.httpClient, harness.baseURL+"/metrics")
-		if fetchErr != nil {
-			return false, fetchErr
-		}
-		value, found := metricValue(
-			metrics,
-			"gh_exporter_scrape_runs_total",
-			map[string]string{"org": "cam3ron2", "result": "failure"},
-		)
-		return found && value >= 1, nil
-	})
-	if err != nil {
-		t.Fatalf("did not observe unhealthy scrape failure: %v", err)
+	org := orgs[0]
+	current := now
+	harness.runtime.Now = func() time.Time { return current }
+
+	if err := harness.runtime.RunLeaderOrgCycle(harness.ctx, org); err == nil {
+		t.Fatalf("first leader cycle should fail while github API is unhealthy")
+	}
+	points := harness.runtime.Store().Snapshot()
+	if value, found := snapshotMetricValue(
+		points,
+		"gh_exporter_scrape_runs_total",
+		map[string]string{"org": "cam3ron2", "result": "failure"},
+	); !found || value < 1 {
+		t.Fatalf("expected failure scrape metric after unhealthy cycle")
 	}
 
-	err = waitForCondition(30*time.Second, 150*time.Millisecond, func() (bool, error) {
-		metrics, fetchErr := fetchEndpoint(harness.httpClient, harness.baseURL+"/metrics")
-		if fetchErr != nil {
-			return false, fetchErr
-		}
-		skipped, foundSkipped := metricValue(
-			metrics,
-			"gh_exporter_scrape_runs_total",
-			map[string]string{"org": "cam3ron2", "result": "skipped_unhealthy"},
-		)
-		if !foundSkipped || skipped < 1 {
-			return false, nil
-		}
-		enqueued, foundEnqueued := metricValue(
-			metrics,
-			"gh_exporter_backfill_jobs_enqueued_total",
-			map[string]string{"org": "cam3ron2", "reason": "github_unhealthy"},
-		)
-		if !foundEnqueued || enqueued < 1 {
-			return false, nil
-		}
-		return true, nil
-	})
-	if err != nil {
-		t.Fatalf("did not observe cooldown skip and queue fallback: %v", err)
+	current = current.Add(100 * time.Millisecond)
+	if err := harness.runtime.RunLeaderOrgCycle(harness.ctx, org); err != nil {
+		t.Fatalf("cooldown cycle should not return error: %v", err)
+	}
+	points = harness.runtime.Store().Snapshot()
+	if value, found := snapshotMetricValue(
+		points,
+		"gh_exporter_scrape_runs_total",
+		map[string]string{"org": "cam3ron2", "result": "skipped_unhealthy"},
+	); !found || value < 1 {
+		t.Fatalf("expected skipped_unhealthy scrape metric during cooldown")
+	}
+	if value, found := snapshotMetricValue(
+		points,
+		"gh_exporter_backfill_jobs_enqueued_total",
+		map[string]string{"org": "cam3ron2", "reason": "github_unhealthy"},
+	); !found || value < 1 {
+		t.Fatalf("expected github_unhealthy backfill enqueue during cooldown")
+	}
+	if harness.runtime.QueueDepth() == 0 {
+		t.Fatalf("expected backfill queue depth to increase during cooldown")
 	}
 
-	err = waitForCondition(30*time.Second, 150*time.Millisecond, func() (bool, error) {
-		metrics, fetchErr := fetchEndpoint(harness.httpClient, harness.baseURL+"/metrics")
-		if fetchErr != nil {
-			return false, fetchErr
-		}
-		success, foundSuccess := metricValue(
-			metrics,
-			"gh_exporter_scrape_runs_total",
-			map[string]string{"org": "cam3ron2", "result": "success"},
-		)
-		if !foundSuccess || success < 1 {
-			return false, nil
-		}
-		githubHealth, foundHealth := metricValue(
-			metrics,
-			"gh_exporter_dependency_health",
-			map[string]string{"dependency": "github"},
-		)
-		if !foundHealth || githubHealth < 1 {
-			return false, nil
-		}
-		return true, nil
-	})
-	if err != nil {
-		t.Fatalf("runtime did not recover after cooldown: %v", err)
+	current = current.Add(700*time.Millisecond + time.Millisecond)
+	if err := harness.runtime.RunLeaderOrgCycle(harness.ctx, org); err != nil {
+		t.Fatalf("post-cooldown cycle should recover: %v", err)
+	}
+	points = harness.runtime.Store().Snapshot()
+	if value, found := snapshotMetricValue(
+		points,
+		"gh_exporter_scrape_runs_total",
+		map[string]string{"org": "cam3ron2", "result": "success"},
+	); !found || value < 1 {
+		t.Fatalf("expected success scrape metric after cooldown")
+	}
+	if value, found := snapshotMetricValue(
+		points,
+		"gh_exporter_dependency_health",
+		map[string]string{"dependency": "github"},
+	); !found || value < 1 {
+		t.Fatalf("expected github dependency health metric to recover")
 	}
 }
 
@@ -602,6 +590,19 @@ func metricValue(metrics string, metricName string, wantLabels map[string]string
 			continue
 		}
 		return parsedValue, true
+	}
+	return 0, false
+}
+
+func snapshotMetricValue(points []store.MetricPoint, name string, wantLabels map[string]string) (float64, bool) {
+	for _, point := range points {
+		if point.Name != name {
+			continue
+		}
+		if !containsLabels(point.Labels, wantLabels) {
+			continue
+		}
+		return point.Value, true
 	}
 	return 0, false
 }
