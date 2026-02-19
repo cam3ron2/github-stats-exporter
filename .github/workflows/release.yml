@@ -22,10 +22,18 @@ jobs:
       release_version: ${{ steps.release.outputs.new_release_version }}
       release_git_tag: ${{ steps.release.outputs.new_release_git_tag }}
     steps:
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
       - name: Checkout
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
@@ -39,7 +47,8 @@ jobs:
             @semantic-release/changelog@6.0.3
             @semantic-release/git@10.0.1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
   goreleaser:
     name: Build Release Binaries
     runs-on: ubuntu-latest
@@ -49,10 +58,18 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
       - name: Checkout
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
@@ -70,7 +87,7 @@ jobs:
           version: latest
           args: release --clean --config .goreleaser.yml
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
   publish-container:
     name: Publish GHCR Multi-Arch Image
     runs-on: ubuntu-latest
@@ -141,11 +158,19 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
       - name: Checkout
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: main
+          token: ${{ steps.app-token.outputs.token }}
       - name: Update deployment image tag
         env:
           RELEASE_TAG: ${{ needs.semantic-release.outputs.release_git_tag }}

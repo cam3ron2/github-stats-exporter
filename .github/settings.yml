@@ -101,12 +101,9 @@ rulesets:
             - squash
             - rebase
     bypass_actors:
-      # Allow GitHub Actions (semantic-release + gitops update jobs) to push to main
-      - actor_id: 15368
-        actor_type: Integration
-        bypass_mode: always
-      # Allow deploy keys to bypass pull request reviews for CI
-      - actor_id:
+      # Allow deploy keys to bypass pull request reviews for CI.
+      # NOTE: actor_id must be null for DeployKey actors.
+      - actor_id: null
         actor_type: DeployKey
         bypass_mode: always
       # 5: Admin
@@ -127,58 +124,14 @@ rulesets:
           # Whether pull requests targeting a matching
           # branch must be tested with the latest code.
           strict_required_status_checks_policy: true # Required field
-          required_status_checks: []
+          required_status_checks:
+            - context: Lint and Fix
+            - context: Unit Tests
+            - context: E2E Tests (Deterministic)
     bypass_actors:
-      # Allow GitHub Actions (semantic-release + gitops update jobs) to push to main
-      - actor_id: 15368
-        actor_type: Integration
-        bypass_mode: always
-      - actor_id:
+      - actor_id: null
         actor_type: DeployKey
         bypass_mode: always
       - actor_id: 5
         actor_type: RepositoryRole
         bypass_mode: always
-  - name: enforce conventional commits
-    target: branch
-    enforcement: active
-    conditions:
-      ref_name:
-        include:
-          - "~DEFAULT_BRANCH"
-        exclude: []
-    rules:
-      - type: commit_message_pattern
-        parameters:
-          name: Conventional Commits
-          negate: false
-          pattern: "^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test){1}(\\([\\w\\-\\.]+\\))?(!)?: ([\\w ])+([\\s\\S]*)"
-          operator: regex
-  - name: lock down settings.yml edits
-    target: push
-    enforcement: active
-    rules:
-      - type: file_path
-        parameters:
-          restricted_file_paths:
-            - ".github/settings.yml"
-    bypass_actors:
-      # Assumes only you hold the admin role. Swap to a specific User actor_id if needed.
-      - actor_id: 5
-        actor_type: RepositoryRole
-        bypass_mode: always
-  - name: enforce semver tags
-    target: tag
-    enforcement: active
-    conditions:
-      ref_name:
-        include:
-          - "~ALL"
-        exclude: []
-    rules:
-      - type: tag_name_pattern
-        parameters:
-          name: Ensure tag names use semantic versioning
-          negate: false
-          pattern: '^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$'
-          operator: regex
