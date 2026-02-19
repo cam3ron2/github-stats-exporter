@@ -33,7 +33,11 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
       - name: Run unit tests
-        run: env -u GOROOT go test -race -count=1 -timeout 90s ./...
+        run: env -u GOROOT go test -race -count=1 -coverprofile=coverage.txt -timeout 90s ./...
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
   e2e-tests:
     name: E2E Tests (Deterministic)
     runs-on: ubuntu-latest
