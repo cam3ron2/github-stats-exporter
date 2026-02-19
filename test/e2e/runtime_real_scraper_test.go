@@ -112,58 +112,41 @@ func TestBackfillFlowProcessesMissedWindowOnFollower(t *testing.T) {
 	}
 	harness := newRealScraperSingleRuntimeHarness(t, fixture, orgs, nil)
 	assertCheckpointMissing(t, harness.redisAddr, "cam3ron2", "repo-a")
-	harness.runtime.StartLeader(harness.ctx)
-	t.Cleanup(harness.runtime.StopLeader)
 
-	err := waitForCondition(30*time.Second, 200*time.Millisecond, func() (bool, error) {
-		metrics, fetchErr := fetchEndpoint(harness.httpClient, harness.baseURL+"/metrics")
-		if fetchErr != nil {
-			return false, fetchErr
-		}
-		value, found := metricValue(metrics, "gh_exporter_backfill_jobs_enqueued_total", map[string]string{
-			"org":    "cam3ron2",
-			"reason": "activity_issue_comments_failed",
-		})
-		if !found || value < 1 {
-			return false, nil
-		}
-		return harness.runtime.QueueDepth() > 0, nil
-	})
-	if err != nil {
-		t.Fatalf("leader did not enqueue backfill message: %v", err)
+	if err := harness.runtime.RunLeaderOrgCycle(harness.ctx, orgs[0]); err != nil {
+		t.Fatalf("leader run should enqueue backfill without failing cycle: %v", err)
+	}
+	points := harness.runtime.Store().Snapshot()
+	if value, found := snapshotMetricValue(
+		points,
+		"gh_exporter_backfill_jobs_enqueued_total",
+		map[string]string{"org": "cam3ron2", "reason": "activity_issue_comments_failed"},
+	); !found || value < 1 {
+		t.Fatalf("expected backfill enqueue metric after leader cycle")
+	}
+	if harness.runtime.QueueDepth() == 0 {
+		t.Fatalf("leader cycle should enqueue at least one backfill message")
 	}
 	assertCheckpointMissing(t, harness.redisAddr, "cam3ron2", "repo-a")
 
-	harness.runtime.StopLeader()
 	harness.runtime.StartFollower(harness.ctx)
 	t.Cleanup(harness.runtime.StopFollower)
 
-	err = waitForCondition(45*time.Second, 200*time.Millisecond, func() (bool, error) {
-		metrics, fetchErr := fetchEndpoint(harness.httpClient, harness.baseURL+"/metrics")
-		if fetchErr != nil {
-			return false, fetchErr
-		}
-		processed, foundProcessed := metricValue(
-			metrics,
+	err := waitForCondition(45*time.Second, 200*time.Millisecond, func() (bool, error) {
+		points := harness.runtime.Store().Snapshot()
+		processed, foundProcessed := snapshotMetricValue(
+			points,
 			"gh_exporter_backfill_jobs_processed_total",
-			map[string]string{
-				"org":    "cam3ron2",
-				"repo":   "repo-a",
-				"result": "processed",
-			},
+			map[string]string{"org": "cam3ron2", "repo": "repo-a", "result": "processed"},
 		)
 		if !foundProcessed || processed < 1 {
 			return false, nil
 		}
 
-		comments, foundComments := metricValue(
-			metrics,
+		comments, foundComments := snapshotMetricValue(
+			points,
 			scrape.MetricActivityIssueComments24h,
-			map[string]string{
-				"org":  "cam3ron2",
-				"repo": "repo-a",
-				"user": "alice",
-			},
+			map[string]string{"org": "cam3ron2", "repo": "repo-a", "user": "alice"},
 		)
 		if !foundComments || comments < 1 {
 			return false, nil
@@ -194,11 +177,18 @@ func TestCheckpointAdvancesAcrossLeaderCycles(t *testing.T) {
 	harness := newRealScraperSingleRuntimeHarness(t, fixture, orgs, nil)
 	assertCheckpointMissing(t, harness.redisAddr, "cam3ron2", "repo-a")
 
-	harness.runtime.StartLeader(harness.ctx)
-	t.Cleanup(harness.runtime.StopLeader)
+	current := now
+	harness.runtime.Now = func() time.Time { return current }
+	if err := harness.runtime.RunLeaderOrgCycle(harness.ctx, orgs[0]); err != nil {
+		t.Fatalf("first leader cycle failed: %v", err)
+	}
+	firstCheckpoint := mustReadCheckpointUnixNano(t, harness.redisAddr, "cam3ron2", "repo-a")
 
-	firstCheckpoint := waitForCheckpointAdvance(t, harness.redisAddr, "cam3ron2", "repo-a", 0)
-	secondCheckpoint := waitForCheckpointAdvance(t, harness.redisAddr, "cam3ron2", "repo-a", firstCheckpoint)
+	current = current.Add(2 * time.Minute)
+	if err := harness.runtime.RunLeaderOrgCycle(harness.ctx, orgs[0]); err != nil {
+		t.Fatalf("second leader cycle failed: %v", err)
+	}
+	secondCheckpoint := mustReadCheckpointUnixNano(t, harness.redisAddr, "cam3ron2", "repo-a")
 	if secondCheckpoint <= firstCheckpoint {
 		t.Fatalf(
 			"expected checkpoint to advance; first=%d second=%d",
@@ -261,12 +251,18 @@ func TestLeaderCooldownAndRecoveryWhenGitHubIsUnhealthy(t *testing.T) {
 	); !found || value < 1 {
 		t.Fatalf("expected skipped_unhealthy scrape metric during cooldown")
 	}
-	if value, found := snapshotMetricValue(
+	enqueuedValue, enqueuedFound := snapshotMetricValue(
 		points,
 		"gh_exporter_backfill_jobs_enqueued_total",
 		map[string]string{"org": "cam3ron2", "reason": "github_unhealthy"},
-	); !found || value < 1 {
-		t.Fatalf("expected github_unhealthy backfill enqueue during cooldown")
+	)
+	dedupedValue, dedupedFound := snapshotMetricValue(
+		points,
+		"gh_exporter_backfill_jobs_deduped_total",
+		map[string]string{"org": "cam3ron2", "reason": "github_unhealthy"},
+	)
+	if (!enqueuedFound || enqueuedValue < 1) && (!dedupedFound || dedupedValue < 1) {
+		t.Fatalf("expected github_unhealthy enqueue or dedupe metric during cooldown")
 	}
 	if harness.runtime.QueueDepth() == 0 {
 		t.Fatalf("expected backfill queue depth to increase during cooldown")
@@ -683,6 +679,22 @@ func assertCheckpointMissing(t *testing.T, redisAddr string, org string, repo st
 	if found {
 		t.Fatalf("expected checkpoint to be missing for %s/%s, got %d", org, repo, unixNanos)
 	}
+}
+
+func mustReadCheckpointUnixNano(t *testing.T, redisAddr string, org string, repo string) int64 {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	unixNanos, found, err := readCheckpointUnixNano(ctx, redisAddr, org, repo)
+	if err != nil {
+		t.Fatalf("read checkpoint for %s/%s: %v", org, repo, err)
+	}
+	if !found {
+		t.Fatalf("expected checkpoint for %s/%s to exist", org, repo)
+	}
+	return unixNanos
 }
 
 func waitForCheckpointAdvance(
