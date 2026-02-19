@@ -4,6 +4,12 @@ package e2e
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/hex"
+	"encoding/pem"
 	"fmt"
 	"net/http"
 	"os"
@@ -225,7 +231,19 @@ func listOrganizationRepos(
 	defer cancel()
 	reposResult, err := dataClient.ListOrgRepos(ctx, orgCfg.Org)
 	if err != nil {
-		t.Fatalf("list repositories for org %q: %v", orgCfg.Org, err)
+		fingerprint, fingerprintErr := privateKeyFingerprint(orgCfg.PrivateKeyPath)
+		if fingerprintErr != nil {
+			fingerprint = "unavailable(" + fingerprintErr.Error() + ")"
+		}
+		t.Fatalf(
+			"list repositories for org %q failed (app_id=%d installation_id=%d key=%q key_fingerprint=%s): %v",
+			orgCfg.Org,
+			orgCfg.AppID,
+			orgCfg.InstallationID,
+			orgCfg.PrivateKeyPath,
+			fingerprint,
+			err,
+		)
 	}
 	if reposResult.Status != githubapi.EndpointStatusOK {
 		t.Fatalf(
@@ -235,4 +253,61 @@ func listOrganizationRepos(
 		)
 	}
 	return reposResult.Repos
+}
+
+func privateKeyFingerprint(path string) (string, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read key file: %w", err)
+	}
+
+	block, _ := pem.Decode(content)
+	if block == nil {
+		return "", fmt.Errorf("decode pem block")
+	}
+
+	var publicKey any
+	switch block.Type {
+	case "PRIVATE KEY":
+		key, parseErr := x509.ParsePKCS8PrivateKey(block.Bytes)
+		if parseErr != nil {
+			return "", fmt.Errorf("parse pkcs8 key: %w", parseErr)
+		}
+		publicKey = publicKeyFromPrivateKey(key)
+	case "RSA PRIVATE KEY":
+		key, parseErr := x509.ParsePKCS1PrivateKey(block.Bytes)
+		if parseErr != nil {
+			return "", fmt.Errorf("parse pkcs1 rsa key: %w", parseErr)
+		}
+		publicKey = &key.PublicKey
+	case "EC PRIVATE KEY":
+		key, parseErr := x509.ParseECPrivateKey(block.Bytes)
+		if parseErr != nil {
+			return "", fmt.Errorf("parse ec key: %w", parseErr)
+		}
+		publicKey = &key.PublicKey
+	default:
+		return "", fmt.Errorf("unsupported pem type %q", block.Type)
+	}
+
+	if publicKey == nil {
+		return "", fmt.Errorf("derive public key")
+	}
+	der, err := x509.MarshalPKIXPublicKey(publicKey)
+	if err != nil {
+		return "", fmt.Errorf("marshal public key: %w", err)
+	}
+	sum := sha256.Sum256(der)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func publicKeyFromPrivateKey(privateKey any) any {
+	switch key := privateKey.(type) {
+	case *rsa.PrivateKey:
+		return &key.PublicKey
+	case *ecdsa.PrivateKey:
+		return &key.PublicKey
+	default:
+		return nil
+	}
 }

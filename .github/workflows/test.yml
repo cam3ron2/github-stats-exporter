@@ -69,15 +69,23 @@ jobs:
           passphrase: ${{ secrets.GPG_PASSPHRASE }}
       - name: Decrypt GitHub App Keys
         run: |
+          set -euo pipefail
           mkdir -p config/keys
           gpg --batch --yes --decrypt \
             --output config/keys/gh-app-key.pem \
             config/keys/gh-app-key.gpg
-          chmod 644 config/keys/gh-app-key.pem
+          chmod 600 config/keys/gh-app-key.pem
           gpg --batch --yes --decrypt \
             --output config/keys/gh-app-key-org.pem \
             config/keys/gh-app-key-org.gpg
-          chmod 644 config/keys/gh-app-key-org.pem
+          chmod 600 config/keys/gh-app-key-org.pem
+      - name: Print key fingerprints (debug)
+        run: |
+          set -euo pipefail
+          echo "gh-app-key.pem fingerprint:"
+          openssl pkey -in config/keys/gh-app-key.pem -pubout -outform DER | sha256sum
+          echo "gh-app-key-org.pem fingerprint:"
+          openssl pkey -in config/keys/gh-app-key-org.pem -pubout -outform DER | sha256sum
       - name: Run live E2E scrape tests
         run: make test-e2e-live
       - name: Cleanup decrypted keys
