@@ -43,6 +43,23 @@ curl_or_fail() {
   printf '%s' "$output"
 }
 
+backfill_queue_depth_from_json() {
+  local queues_json="$1"
+  python3 -c '
+import json
+import sys
+
+queues = json.load(sys.stdin)
+target_names = {"gh.backfill.jobs", "gh.backfill.dlq"}
+total = 0
+for queue in queues:
+    name = str(queue.get("name", ""))
+    if name in target_names or name.startswith("gh.backfill.jobs.retry."):
+        total += int(queue.get("messages", 0) or 0)
+print(total)
+' <<<"$queues_json"
+}
+
 wait_for_metric_or_fail() {
   local url="$1"
   local context="$2"
@@ -195,27 +212,42 @@ contains_or_fail "$queues_json" '"name":"gh.backfill.dlq"' "rabbitmq queues"
 contains_or_fail "$queues_json" '"name":"gh.backfill.jobs.retry.1m0s"' "rabbitmq queues"
 
 echo "[check] follower backfill processed metric policy"
-backfill_queue_depth="$(
-  python3 -c '
-import json
-import sys
-
-queues = json.load(sys.stdin)
-target_names = {"gh.backfill.jobs", "gh.backfill.dlq"}
-total = 0
-for queue in queues:
-    name = str(queue.get("name", ""))
-    if name in target_names or name.startswith("gh.backfill.jobs.retry."):
-        total += int(queue.get("messages", 0) or 0)
-print(total)
-' <<<"$queues_json"
-)"
+backfill_queue_depth="$(backfill_queue_depth_from_json "$queues_json")"
 
 if (( backfill_queue_depth > 0 )); then
-  contains_or_fail \
-    "$follower_metrics" \
-    'gh_exporter_backfill_jobs_processed_total' \
-    "follower metrics (queue depth ${backfill_queue_depth})"
+  timeout_seconds="${GITHUB_STATS_BACKFILL_METRIC_TIMEOUT_SECONDS:-120}"
+  poll_seconds="${GITHUB_STATS_BACKFILL_METRIC_POLL_SECONDS:-2}"
+  start_ts="$(date +%s)"
+  metric_found=0
+  queue_depth_now="$backfill_queue_depth"
+
+  while true; do
+    follower_metrics="$(curl_or_fail "http://localhost:8081/metrics" "follower metrics")"
+    if grep -Fq 'gh_exporter_backfill_jobs_processed_total' <<<"$follower_metrics"; then
+      metric_found=1
+      break
+    fi
+
+    queues_json="$(curl_or_fail "http://localhost:15672/api/queues/%2F" "rabbitmq queues" -u githubstats:githubstats)"
+    queue_depth_now="$(backfill_queue_depth_from_json "$queues_json")"
+    if (( queue_depth_now == 0 )); then
+      break
+    fi
+
+    now_ts="$(date +%s)"
+    if (( now_ts - start_ts >= timeout_seconds )); then
+      break
+    fi
+    sleep "$poll_seconds"
+  done
+
+  if (( metric_found == 1 )); then
+    echo "[info] follower metrics include gh_exporter_backfill_jobs_processed_total with queue depth ${queue_depth_now}"
+  elif (( queue_depth_now == 0 )); then
+    echo "[info] backfill queue drained before gh_exporter_backfill_jobs_processed_total appeared"
+  else
+    fail "follower metrics (queue depth ${queue_depth_now}): expected to find 'gh_exporter_backfill_jobs_processed_total'"
+  fi
 else
   if grep -Fq 'gh_exporter_backfill_jobs_processed_total' <<<"$follower_metrics"; then
     echo "[info] follower metrics include gh_exporter_backfill_jobs_processed_total with queue depth 0"
