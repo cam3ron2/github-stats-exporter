@@ -19,13 +19,13 @@
 
 * replace bash e2e with go e2e tests ([56249ce](https://github.com/cam3ron2/github-stats-exporter/commit/56249ceb012f0d4b38e688ed8fc5f9b09f4fa6db))
 
-# Changelog
+# 1.0.0 (2026-02-18)
 
-## 1.0.0 (2026-02-18)
 
 ### Bug Fixes
 
 * fix attribution for service accounts ([1c2e460](https://github.com/cam3ron2/github-stats-exporter/commit/1c2e460858a5461d6d6a0a628be0db199b8e6fc5))
+
 
 ### Features
 
