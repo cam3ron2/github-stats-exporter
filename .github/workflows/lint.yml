@@ -27,6 +27,7 @@ jobs:
       - name: Super-Linter
         uses: super-linter/super-linter@v8
         env:
+          GO111MODULE: on
           # exclude auto-generated files from linting
           FILTER_REGEX_EXCLUDE: ".*.md|.*.MD|.*scripts/.*"
           LINTER_RULES_PATH: .github/linters

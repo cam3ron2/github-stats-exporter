@@ -184,22 +184,68 @@ contains_or_fail "$follower_metrics" 'gh_exporter_dependency_health' "follower m
 contains_or_fail "$follower_metrics" 'gh_exporter_queue_oldest_message_age_seconds' "follower metrics"
 
 echo "[check] unique org labels are present in leader and follower metrics"
-leader_org_labels="$(echo "$leader_metrics" | sed -n 's/.*org="\([^"]*\)".*/\1/p' | sort -u)"
-follower_org_labels="$(echo "$follower_metrics" | sed -n 's/.*org="\([^"]*\)".*/\1/p' | sort -u)"
-leader_org_count="$(echo "$leader_org_labels" | sed '/^$/d' | wc -l | tr -d ' ')"
-follower_org_count="$(echo "$follower_org_labels" | sed '/^$/d' | wc -l | tr -d ' ')"
-if (( leader_org_count < expected_org_label_count )); then
-  echo "[error] expected at least ${expected_org_label_count} unique org labels on leader, got ${leader_org_count}"
-  echo "[debug] leader org labels:"
-  echo "$leader_org_labels"
-  exit 1
-fi
-if (( follower_org_count < expected_org_label_count )); then
-  echo "[error] expected at least ${expected_org_label_count} unique org labels on follower, got ${follower_org_count}"
-  echo "[debug] follower org labels:"
-  echo "$follower_org_labels"
-  exit 1
-fi
+org_label_timeout_seconds="${GITHUB_STATS_ORG_LABEL_TIMEOUT_SECONDS:-120}"
+org_label_poll_seconds="${GITHUB_STATS_ORG_LABEL_POLL_SECONDS:-2}"
+org_label_start_ts="$(date +%s)"
+leader_labels_metrics_file="$(mktemp)"
+follower_labels_metrics_file="$(mktemp)"
+tmp_files+=("$leader_labels_metrics_file" "$follower_labels_metrics_file")
+
+while true; do
+  fetch_metrics_pair_or_fail \
+    "http://localhost:8080/metrics" \
+    "http://localhost:8081/metrics" \
+    "$leader_labels_metrics_file" \
+    "$follower_labels_metrics_file" \
+    "org labels fetch"
+
+  leader_metrics="$(cat "$leader_labels_metrics_file")"
+  follower_metrics="$(cat "$follower_labels_metrics_file")"
+  leader_org_labels="$(echo "$leader_metrics" | sed -n 's/.*org="\([^"]*\)".*/\1/p' | sort -u)"
+  follower_org_labels="$(echo "$follower_metrics" | sed -n 's/.*org="\([^"]*\)".*/\1/p' | sort -u)"
+  leader_org_count="$(echo "$leader_org_labels" | sed '/^$/d' | wc -l | tr -d ' ')"
+  follower_org_count="$(echo "$follower_org_labels" | sed '/^$/d' | wc -l | tr -d ' ')"
+
+  leader_orgs_file="$(mktemp)"
+  follower_orgs_file="$(mktemp)"
+  tmp_files+=("$leader_orgs_file" "$follower_orgs_file")
+  echo "$leader_org_labels" > "$leader_orgs_file"
+  echo "$follower_org_labels" > "$follower_orgs_file"
+  label_sets_match=0
+  if diff -u "$leader_orgs_file" "$follower_orgs_file" >/dev/null; then
+    label_sets_match=1
+  fi
+
+  if (( leader_org_count >= expected_org_label_count )) &&
+    (( follower_org_count >= expected_org_label_count )) &&
+    (( label_sets_match == 1 )); then
+    break
+  fi
+
+  now_ts="$(date +%s)"
+  if (( now_ts - org_label_start_ts >= org_label_timeout_seconds )); then
+    if (( leader_org_count < expected_org_label_count )); then
+      echo "[error] expected at least ${expected_org_label_count} unique org labels on leader, got ${leader_org_count}"
+      echo "[debug] leader org labels:"
+      echo "$leader_org_labels"
+      exit 1
+    fi
+    if (( follower_org_count < expected_org_label_count )); then
+      echo "[error] expected at least ${expected_org_label_count} unique org labels on follower, got ${follower_org_count}"
+      echo "[debug] follower org labels:"
+      echo "$follower_org_labels"
+      exit 1
+    fi
+    echo "[debug] leader org labels:"
+    echo "$leader_org_labels"
+    echo "[debug] follower org labels:"
+    echo "$follower_org_labels"
+    fail "org label sets differ between leader and follower targets after ${org_label_timeout_seconds}s"
+  fi
+
+  sleep "$org_label_poll_seconds"
+done
+
 leader_orgs_file="$(mktemp)"
 follower_orgs_file="$(mktemp)"
 tmp_files+=("$leader_orgs_file" "$follower_orgs_file")
