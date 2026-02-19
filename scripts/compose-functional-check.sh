@@ -199,10 +199,35 @@ follower_activity="$(mktemp)"
 tmp_files+=("$leader_activity" "$follower_activity")
 leader_metrics="$(wait_for_activity_or_fail "http://localhost:8080/metrics" "leader metrics" 300 2)"
 follower_metrics="$(wait_for_activity_or_fail "http://localhost:8081/metrics" "follower metrics" 300 2)"
-grep '^gh_activity_' <<<"$leader_metrics" | sort > "$leader_activity"
-grep '^gh_activity_' <<<"$follower_metrics" | sort > "$follower_activity"
-if ! diff -u "$leader_activity" "$follower_activity" >/dev/null; then
-  fail "gh_activity_ series differ between leader and follower targets"
+convergence_timeout_seconds="${GITHUB_STATS_ACTIVITY_CONVERGENCE_TIMEOUT_SECONDS:-60}"
+convergence_poll_seconds="${GITHUB_STATS_ACTIVITY_CONVERGENCE_POLL_SECONDS:-2}"
+convergence_start_ts="$(date +%s)"
+activity_converged=0
+
+while true; do
+  grep '^gh_activity_' <<<"$leader_metrics" | sort > "$leader_activity"
+  grep '^gh_activity_' <<<"$follower_metrics" | sort > "$follower_activity"
+  if diff -u "$leader_activity" "$follower_activity" >/dev/null; then
+    activity_converged=1
+    break
+  fi
+
+  now_ts="$(date +%s)"
+  if (( now_ts - convergence_start_ts >= convergence_timeout_seconds )); then
+    break
+  fi
+
+  sleep "$convergence_poll_seconds"
+  leader_metrics="$(curl_or_fail "http://localhost:8080/metrics" "leader metrics")"
+  follower_metrics="$(curl_or_fail "http://localhost:8081/metrics" "follower metrics")"
+done
+
+if (( activity_converged == 0 )); then
+  echo "[debug] leader gh_activity_ series count: $(wc -l < "$leader_activity" | tr -d ' ')"
+  echo "[debug] follower gh_activity_ series count: $(wc -l < "$follower_activity" | tr -d ' ')"
+  echo "[debug] latest gh_activity_ diff:"
+  diff -u "$leader_activity" "$follower_activity" | sed -n '1,120p' || true
+  fail "gh_activity_ series differ between leader and follower targets after ${convergence_timeout_seconds}s"
 fi
 
 echo "[check] rabbitmq backfill queues"
