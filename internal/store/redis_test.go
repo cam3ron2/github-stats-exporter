@@ -288,13 +288,6 @@ func (c *fakeRedisClient) SRem(_ context.Context, key string, members ...any) *r
 	return redis.NewIntResult(removed, nil)
 }
 
-func (c *fakeRedisClient) keyExists(key string) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	return c.keyExistsLocked(key)
-}
-
 func (c *fakeRedisClient) keyExistsLocked(key string) bool {
 	if _, exists := c.hashes[key]; exists {
 		return true
@@ -311,13 +304,6 @@ func (c *fakeRedisClient) keyExistsLocked(key string) bool {
 	return false
 }
 
-func (c *fakeRedisClient) purgeIfExpired(key string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.purgeIfExpiredLocked(key)
-}
-
 func (c *fakeRedisClient) purgeIfExpiredLocked(key string) {
 	expiry, ok := c.expiresAt[key]
 	if !ok || c.now.Before(expiry) {
@@ -329,13 +315,6 @@ func (c *fakeRedisClient) purgeIfExpiredLocked(key string) {
 	delete(c.sets, key)
 	delete(c.stringLocks, key)
 	delete(c.zsets, key)
-}
-
-func (c *fakeRedisClient) purgeAllExpired() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.purgeAllExpiredLocked()
 }
 
 func (c *fakeRedisClient) purgeAllExpiredLocked() {
