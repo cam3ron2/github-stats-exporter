@@ -201,7 +201,10 @@ See full details in [docs/internal/release_pipeline.md](docs/internal/release_pi
 make test
 
 # deterministic e2e suite (same path used by CI)
-go test -tags=e2e -race -count=1 -timeout 180s ./test/e2e/...
+make test-e2e
+
+# live e2e scrape against config/local.yaml + local app keys
+make test-e2e-live
 
 # lint
 make lint

@@ -40,13 +40,25 @@ GO := env -u GOROOT GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go
 .PHONY: default
 default: help
 
-.PHONY: test build run fmt compose
+.PHONY: test test-e2e test-e2e-live build run fmt compose
 
 ## Run all unit tests.
 .PHONY: test
 test:
 	@echo "${YELLOW}[TEST] ${GREEN}Start Running unit tests.${RESET}"
 	$(call quiet-command,$(GO) test -race -v -count=1 -timeout 45s ./...)
+
+## Run deterministic end-to-end tests.
+.PHONY: test-e2e
+test-e2e:
+	@echo "${YELLOW}[TEST] ${GREEN}Start running deterministic e2e tests.${RESET}"
+	$(call quiet-command,$(GO) test -tags=e2e -race -v -count=1 -timeout 240s ./test/e2e/...)
+
+## Run live end-to-end scrape tests using config/local.yaml and local app keys.
+.PHONY: test-e2e-live
+test-e2e-live:
+	@echo "${YELLOW}[TEST] ${GREEN}Start running live e2e scrape tests.${RESET}"
+	$(call quiet-command,$(GO) test -tags='e2e live' -race -v -count=1 -timeout 600s -run '^TestLiveScrapeFromLocalConfig$$' ./test/e2e/...)
 
 ## Run the application
 .PHONY: run

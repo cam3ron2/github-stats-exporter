@@ -16,6 +16,7 @@ import (
 	"github.com/cam3ron2/github-stats-exporter/internal/config"
 	"github.com/cam3ron2/github-stats-exporter/internal/githubapi"
 	"github.com/cam3ron2/github-stats-exporter/internal/scrape"
+	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 )
 
@@ -109,6 +110,7 @@ func TestBackfillFlowProcessesMissedWindowOnFollower(t *testing.T) {
 		},
 	}
 	harness := newRealScraperSingleRuntimeHarness(t, fixture, orgs, nil)
+	assertCheckpointMissing(t, harness.redisAddr, "cam3ron2", "repo-a")
 	harness.runtime.StartLeader(harness.ctx)
 	t.Cleanup(harness.runtime.StopLeader)
 
@@ -129,6 +131,7 @@ func TestBackfillFlowProcessesMissedWindowOnFollower(t *testing.T) {
 	if err != nil {
 		t.Fatalf("leader did not enqueue backfill message: %v", err)
 	}
+	assertCheckpointMissing(t, harness.redisAddr, "cam3ron2", "repo-a")
 
 	harness.runtime.StopLeader()
 	harness.runtime.StartFollower(harness.ctx)
@@ -169,6 +172,39 @@ func TestBackfillFlowProcessesMissedWindowOnFollower(t *testing.T) {
 	if err != nil {
 		t.Fatalf("follower did not process backfill message: %v", err)
 	}
+	waitForCheckpointAdvance(t, harness.redisAddr, "cam3ron2", "repo-a", 0)
+}
+
+func TestCheckpointAdvancesAcrossLeaderCycles(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	fixture := newFakeGitHubAPI(t)
+	fixture.SetOrgRepos("cam3ron2", []string{"repo-a"})
+	fixture.SetRepository("cam3ron2", "repo-a", buildRepositoryFixture(now, "alice"))
+
+	orgs := []config.GitHubOrgConfig{
+		{
+			Org:               "cam3ron2",
+			AppID:             1,
+			InstallationID:    1001,
+			ScrapeInterval:    120 * time.Millisecond,
+			PerOrgConcurrency: 1,
+		},
+	}
+	harness := newRealScraperSingleRuntimeHarness(t, fixture, orgs, nil)
+	assertCheckpointMissing(t, harness.redisAddr, "cam3ron2", "repo-a")
+
+	harness.runtime.StartLeader(harness.ctx)
+	t.Cleanup(harness.runtime.StopLeader)
+
+	firstCheckpoint := waitForCheckpointAdvance(t, harness.redisAddr, "cam3ron2", "repo-a", 0)
+	secondCheckpoint := waitForCheckpointAdvance(t, harness.redisAddr, "cam3ron2", "repo-a", firstCheckpoint)
+	if secondCheckpoint <= firstCheckpoint {
+		t.Fatalf(
+			"expected checkpoint to advance; first=%d second=%d",
+			firstCheckpoint,
+			secondCheckpoint,
+		)
+	}
 }
 
 func TestLeaderCooldownAndRecoveryWhenGitHubIsUnhealthy(t *testing.T) {
@@ -191,7 +227,7 @@ func TestLeaderCooldownAndRecoveryWhenGitHubIsUnhealthy(t *testing.T) {
 		cfg.GitHub.UnhealthyFailureThreshold = 1
 		cfg.GitHub.UnhealthyCooldown = 700 * time.Millisecond
 		cfg.Health.GitHubProbeInterval = time.Hour
-		cfg.Health.GitHubRecoverSuccessThreshold = 1
+		cfg.Health.GitHubRecoverSuccessThreshold = 2
 	}
 
 	harness := newRealScraperSingleRuntimeHarness(t, fixture, orgs, cfgOverride)
@@ -274,6 +310,7 @@ type singleRuntimeHarness struct {
 	baseURL    string
 	httpClient *http.Client
 	runtime    *app.Runtime
+	redisAddr  string
 }
 
 func newRealScraperDualRuntimeHarness(
@@ -355,7 +392,8 @@ func newRealScraperSingleRuntimeHarness(
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
 		},
-		runtime: runtime,
+		runtime:   runtime,
+		redisAddr: redisServer.Addr(),
 	}
 }
 
@@ -630,4 +668,79 @@ func containsLabels(actual map[string]string, wanted map[string]string) bool {
 		}
 	}
 	return true
+}
+
+func assertCheckpointMissing(t *testing.T, redisAddr string, org string, repo string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	unixNanos, found, err := readCheckpointUnixNano(ctx, redisAddr, org, repo)
+	if err != nil {
+		t.Fatalf("read checkpoint for %s/%s: %v", org, repo, err)
+	}
+	if found {
+		t.Fatalf("expected checkpoint to be missing for %s/%s, got %d", org, repo, unixNanos)
+	}
+}
+
+func waitForCheckpointAdvance(
+	t *testing.T,
+	redisAddr string,
+	org string,
+	repo string,
+	afterUnixNano int64,
+) int64 {
+	t.Helper()
+
+	var observed int64
+	err := waitForCondition(30*time.Second, 120*time.Millisecond, func() (bool, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		unixNanos, found, err := readCheckpointUnixNano(ctx, redisAddr, org, repo)
+		if err != nil {
+			return false, err
+		}
+		if !found {
+			return false, nil
+		}
+		if unixNanos <= afterUnixNano {
+			return false, nil
+		}
+		observed = unixNanos
+		return true, nil
+	})
+	if err != nil {
+		t.Fatalf("checkpoint for %s/%s did not advance beyond %d: %v", org, repo, afterUnixNano, err)
+	}
+	return observed
+}
+
+func readCheckpointUnixNano(
+	ctx context.Context,
+	redisAddr string,
+	org string,
+	repo string,
+) (int64, bool, error) {
+	client := redis.NewClient(&redis.Options{Addr: redisAddr})
+	defer client.Close()
+
+	fields, err := client.HGetAll(ctx, checkpointRedisKey(org, repo)).Result()
+	if err != nil {
+		return 0, false, err
+	}
+	rawCheckpoint := strings.TrimSpace(fields["checkpoint_unix_nano"])
+	if rawCheckpoint == "" {
+		return 0, false, nil
+	}
+	unixNanos, err := strconv.ParseInt(rawCheckpoint, 10, 64)
+	if err != nil {
+		return 0, false, err
+	}
+	return unixNanos, true, nil
+}
+
+func checkpointRedisKey(org string, repo string) string {
+	return "ghm:checkpoint:" + strings.TrimSpace(org) + "/" + strings.TrimSpace(repo)
 }

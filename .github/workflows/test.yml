@@ -49,3 +49,40 @@ jobs:
           cache-dependency-path: go.sum
       - name: Run deterministic E2E tests
         run: env -u GOROOT go test -tags=e2e -race -count=1 -timeout 180s ./test/e2e/...
+  e2e-live-tests:
+    name: E2E Tests (Live Scrape)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+      - name: Decrypt GitHub app keys
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          gpg --batch --yes --pinentry-mode loopback \
+            --passphrase "${GPG_PASSPHRASE}" \
+            --decrypt \
+            --output config/keys/gh-app-key.pem \
+            config/keys/gh-app-key.gpg
+
+          gpg --batch --yes --pinentry-mode loopback \
+            --passphrase "${GPG_PASSPHRASE}" \
+            --decrypt \
+            --output config/keys/gh-app-key-org.pem \
+            config/keys/gh-app-key-org.gpg
+
+          chmod 644 config/keys/gh-app-key.pem config/keys/gh-app-key-org.pem
+      - name: Run live E2E scrape tests
+        run: make test-e2e-live
+      - name: Cleanup decrypted keys
+        if: always()
+        run: rm -f config/keys/gh-app-key.pem config/keys/gh-app-key-org.pem

@@ -31,8 +31,6 @@ type runtimeHarness struct {
 }
 
 func TestRuntimeEndpointsConverge(t *testing.T) {
-	t.Parallel()
-
 	harness := newRuntimeHarness(t)
 
 	t.Run("health_endpoints_report_ready_roles", func(t *testing.T) {
