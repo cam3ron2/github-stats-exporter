@@ -1,3 +1,10 @@
+# [1.2.0](https://github.com/cam3ron2/github-stats-exporter/compare/v1.1.1...v1.2.0) (2026-02-19)
+
+
+### Features
+
+* **copilot:** complete capacity profiling and Copilot egress policy hardening ([f2545bd](https://github.com/cam3ron2/github-stats-exporter/commit/f2545bd2766ea7ddbc19edd0a40439ef68e632a0))
+
 ## [1.1.1](https://github.com/cam3ron2/github-stats-exporter/compare/v1.1.0...v1.1.1) (2026-02-19)
 
 
