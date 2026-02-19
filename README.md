@@ -7,6 +7,7 @@
 [![Test](https://github.com/cam3ron2/github-stats-exporter/actions/workflows/test.yml/badge.svg)](https://github.com/cam3ron2/github-stats-exporter/actions/workflows/test.yml)
 [![Lint](https://github.com/cam3ron2/github-stats-exporter/actions/workflows/lint.yml/badge.svg)](https://github.com/cam3ron2/github-stats-exporter/actions/workflows/lint.yml)
 [![Release](https://github.com/cam3ron2/github-stats-exporter/actions/workflows/release.yml/badge.svg)](https://github.com/cam3ron2/github-stats-exporter/actions/workflows/release.yml)
+[![codecov](https://codecov.io/github/cam3ron2/github-stats-exporter/branch/main/graph/badge.svg?token=98QVWNZKBG)](https://codecov.io/github/cam3ron2/github-stats-exporter)
 [![Go Report Card](https://goreportcard.com/badge/github.com/cam3ron2/github-stats-exporter)](https://goreportcard.com/report/github.com/cam3ron2/github-stats-exporter)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/cam3ron2/github-stats-exporter)](https://github.com/cam3ron2/github-stats-exporter/blob/main/go.mod)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)

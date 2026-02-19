@@ -40,7 +40,7 @@ GO := env -u GOROOT GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go
 .PHONY: default
 default: help
 
-.PHONY: test test-e2e test-e2e-live build run fmt compose
+.PHONY: test test-e2e test-e2e-live build run fmt compose issues-backlog issues-backlog-apply
 
 ## Run all unit tests.
 .PHONY: test
@@ -114,6 +114,18 @@ compose:
 	@echo "${YELLOW}[RUN] ${GREEN}Start running the container locally.${RESET}"
 	$(call quiet-command,docker-compose rm -f)
 	$(call quiet-command,docker-compose up --build)
+
+## Dry-run backlog issue creation from docs/ISSUE_BACKLOG.md.
+.PHONY: issues-backlog
+issues-backlog:
+	@echo "${YELLOW}[OPS] ${GREEN}Preview backlog issue creation.${RESET}"
+	$(call quiet-command,bash scripts/create-backlog-issues.sh --file docs/ISSUE_BACKLOG.md)
+
+## Create backlog issues from docs/ISSUE_BACKLOG.md.
+.PHONY: issues-backlog-apply
+issues-backlog-apply:
+	@echo "${YELLOW}[OPS] ${GREEN}Create backlog issues.${RESET}"
+	$(call quiet-command,bash scripts/create-backlog-issues.sh --file docs/ISSUE_BACKLOG.md --apply)
 
 .PHONY: lint-go
 lint-go:
