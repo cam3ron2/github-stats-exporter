@@ -20,6 +20,7 @@ resources:
   - app-service-http.yaml
   - app-service-metrics.yaml
   - app-pdb.yaml
+  - dependencies-networkpolicy.yaml
   - redis-service.yaml
   - redis-statefulset.yaml
   - redis-pdb.yaml
