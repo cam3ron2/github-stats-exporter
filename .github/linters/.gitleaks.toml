@@ -6,3 +6,12 @@ title = "gitleaks config"
 # https://github.com/zricethezav/gitleaks/blob/master/config/gitleaks.toml
 useDefault = true
 # disabledRules = ["generic-api-key"]
+[allowlist]
+paths = [
+  '''^.gocache/''',        # Excludes .gocache/
+  '''^.gomodcache/''',     # Excludes .gomodcache/
+  '''^.golangci-cache/''', # Excludes .golangci-cache/
+  '''^.cache/''',          # Excludes .cache/
+  '''^docs/''',            # Excludes docs/
+  '''^config/keys/''',     # Excludes config/keys/
+]

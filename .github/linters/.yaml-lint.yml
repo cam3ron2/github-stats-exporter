@@ -6,6 +6,7 @@
 # You can disable line with:              #
 # # yamllint disable-line                 #
 ###########################################
+ignore-from-file: .gitignore
 rules:
   braces:
     level: warning

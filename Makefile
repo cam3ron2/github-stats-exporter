@@ -111,7 +111,7 @@ lint-go:
 .PHONY: gitleaks
 gitleaks:
 	@echo "${YELLOW}[LINT] ${GREEN}Start gitleaks.${RESET}"
-	$(call quiet-command,gitleaks -c .github/linters/.gitleaks.toml dir .)
+	$(call quiet-command,gitleaks --log-level info -v -c .github/linters/.gitleaks.toml dir .)
 
 .PHONY: lint-yaml
 lint-yaml:
