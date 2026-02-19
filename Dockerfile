@@ -19,4 +19,6 @@ WORKDIR /app
 COPY --from=builder /out/github-stats-exporter /app/github-stats-exporter
 
 EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD wget -q --spider http://127.0.0.1:8080/readyz || exit 1
 ENTRYPOINT ["/app/github-stats-exporter"]
