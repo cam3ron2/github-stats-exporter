@@ -62,25 +62,22 @@ jobs:
           go-version-file: go.mod
           cache: true
           cache-dependency-path: go.sum
-      - name: Decrypt GitHub app keys
-        env:
-          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
-          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+      - name: Import GPG key
+        uses: crazy-max/ghaction-import-gpg@v6
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.GPG_PASSPHRASE }}
+      - name: Decrypt GitHub App Keys
         run: |
-          set -euo pipefail
-          gpg --batch --yes --pinentry-mode loopback \
-            --passphrase "${GPG_PASSPHRASE}" \
-            --decrypt \
+          mkdir -p config/keys
+          gpg --batch --yes --decrypt \
             --output config/keys/gh-app-key.pem \
             config/keys/gh-app-key.gpg
-
-          gpg --batch --yes --pinentry-mode loopback \
-            --passphrase "${GPG_PASSPHRASE}" \
-            --decrypt \
+          chmod 644 config/keys/gh-app-key.pem
+          gpg --batch --yes --decrypt \
             --output config/keys/gh-app-key-org.pem \
             config/keys/gh-app-key-org.gpg
-
-          chmod 644 config/keys/gh-app-key.pem config/keys/gh-app-key-org.pem
+          chmod 644 config/keys/gh-app-key-org.pem
       - name: Run live E2E scrape tests
         run: make test-e2e-live
       - name: Cleanup decrypted keys
