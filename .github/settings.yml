@@ -101,10 +101,6 @@ rulesets:
             - squash
             - rebase
     bypass_actors:
-      # Allow organization admins to bypass pull request reviews
-      - actor_id:
-        actor_type: OrganizationAdmin
-        bypass_mode: always
       # Allow GitHub Actions (semantic-release + gitops update jobs) to push to main
       - actor_id: 15368
         actor_type: Integration
@@ -113,14 +109,6 @@ rulesets:
       - actor_id:
         actor_type: DeployKey
         bypass_mode: always
-      # Allow enterprise owners to bypass pull request reviews
-      - actor_id:
-        actor_type: EnterpriseOwner
-        bypass_mode: always
-      # Allow repository admin role to bypass pull request reviews
-      # usable repository role ids are:
-      # 2: Maintain
-      # 4: Write
       # 5: Admin
       - actor_id: 5
         actor_type: RepositoryRole
@@ -141,18 +129,12 @@ rulesets:
           strict_required_status_checks_policy: true # Required field
           required_status_checks: []
     bypass_actors:
-      - actor_id:
-        actor_type: OrganizationAdmin
-        bypass_mode: always
       # Allow GitHub Actions (semantic-release + gitops update jobs) to push to main
       - actor_id: 15368
         actor_type: Integration
         bypass_mode: always
       - actor_id:
         actor_type: DeployKey
-        bypass_mode: always
-      - actor_id:
-        actor_type: EnterpriseOwner
         bypass_mode: always
       - actor_id: 5
         actor_type: RepositoryRole
