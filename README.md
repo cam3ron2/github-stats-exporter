@@ -9,6 +9,7 @@
 [![Release](https://github.com/cam3ron2/github-stats-exporter/actions/workflows/release.yml/badge.svg)](https://github.com/cam3ron2/github-stats-exporter/actions/workflows/release.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/cam3ron2/github-stats-exporter)](https://goreportcard.com/report/github.com/cam3ron2/github-stats-exporter)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/cam3ron2/github-stats-exporter)](https://github.com/cam3ron2/github-stats-exporter/blob/main/go.mod)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 `github-stats-exporter` scrapes contributor activity from one or more GitHub organizations and exposes the result as OpenMetrics for Prometheus-style scraping and dashboards, or forwarding to the monitoring/observability platform of your choice.
 
@@ -199,10 +200,16 @@ See full details in [docs/internal/release_pipeline.md](docs/internal/release_pi
 # tests
 make test
 
+# deterministic e2e suite (same path used by CI)
+make test-e2e
+
+# live e2e scrape against config/local.yaml + local app keys
+make test-e2e-live
+
 # lint
 make lint
 
-# functional compose checks (requires running stack)
+# compose smoke checks (requires running stack; optional)
 ./scripts/compose-functional-check.sh
 ```
 

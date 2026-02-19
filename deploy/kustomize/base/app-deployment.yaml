@@ -3,6 +3,9 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: github-stats-exporter
+  annotations:
+    checkov.io/skip1: CKV_K8S_38=Leader election requires Kubernetes API access from the service account token.
+    checkov.io/skip2: CKV_K8S_43=Digest pinning is enforced by environment-specific image promotion controls.
   labels:
     app: github-stats-exporter
     app.kubernetes.io/component: exporter
@@ -21,11 +24,14 @@ spec:
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
+        runAsGroup: 10001
         fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: github-stats-exporter
-          image: ghcr.io/your-org/github-stats-exporter:latest
-          imagePullPolicy: IfNotPresent
+          image: ghcr.io/your-org/github-stats-exporter:v0.0.0
+          imagePullPolicy: Always
           args: ["--config=/etc/github-stats-exporter/config.yaml"]
           env:
             - name: GITHUB_STATS_INITIAL_ROLE

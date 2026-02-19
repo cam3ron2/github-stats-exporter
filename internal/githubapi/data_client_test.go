@@ -3,6 +3,7 @@ package githubapi
 import (
 	"context"
 	"net/http"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -126,7 +127,6 @@ func TestDataClientListOrgReposStatusHandling(t *testing.T) {
 		wantStatus EndpointStatus
 	}{
 		{name: "forbidden", statusCode: http.StatusForbidden, wantStatus: EndpointStatusForbidden},
-		{name: "not_found", statusCode: http.StatusNotFound, wantStatus: EndpointStatusNotFound},
 		{name: "conflict", statusCode: http.StatusConflict, wantStatus: EndpointStatusConflict},
 		{name: "unprocessable", statusCode: http.StatusUnprocessableEntity, wantStatus: EndpointStatusUnprocessable},
 	}
@@ -155,6 +155,93 @@ func TestDataClientListOrgReposStatusHandling(t *testing.T) {
 			}
 			if len(got.Repos) != 0 {
 				t.Fatalf("len(Repos) = %d, want 0", len(got.Repos))
+			}
+		})
+	}
+}
+
+func TestDataClientListOrgReposPersonalAccountFallback(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name          string
+		responses     []*http.Response
+		wantStatus    EndpointStatus
+		wantRepoNames []string
+		wantCalls     int
+	}{
+		{
+			name: "org_not_found_falls_back_to_user_repos",
+			responses: []*http.Response{
+				newResponse(http.StatusNotFound, map[string]string{}, `{"message":"not found"}`),
+				newResponse(http.StatusOK, map[string]string{}, `[
+					{"name":"repo-user","full_name":"cam/repo-user","default_branch":"main","archived":false,"disabled":false,"fork":false}
+				]`),
+			},
+			wantStatus:    EndpointStatusOK,
+			wantRepoNames: []string{"repo-user"},
+			wantCalls:     2,
+		},
+		{
+			name: "org_and_user_not_found_returns_not_found",
+			responses: []*http.Response{
+				newResponse(http.StatusNotFound, map[string]string{}, `{"message":"not found"}`),
+				newResponse(http.StatusNotFound, map[string]string{}, `{"message":"not found"}`),
+			},
+			wantStatus:    EndpointStatusNotFound,
+			wantRepoNames: []string{},
+			wantCalls:     2,
+		},
+		{
+			name: "org_not_found_user_forbidden_returns_forbidden",
+			responses: []*http.Response{
+				newResponse(http.StatusNotFound, map[string]string{}, `{"message":"not found"}`),
+				newResponse(http.StatusForbidden, map[string]string{}, `{"message":"forbidden"}`),
+			},
+			wantStatus:    EndpointStatusForbidden,
+			wantRepoNames: []string{},
+			wantCalls:     2,
+		},
+		{
+			name: "forbidden_org_does_not_fallback",
+			responses: []*http.Response{
+				newResponse(http.StatusForbidden, map[string]string{}, `{"message":"forbidden"}`),
+			},
+			wantStatus:    EndpointStatusForbidden,
+			wantRepoNames: []string{},
+			wantCalls:     1,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			doer := &fakeDoer{responses: tc.responses}
+			client, err := NewDataClient("", newTestRequestClient(doer))
+			if err != nil {
+				t.Fatalf("NewDataClient() unexpected error: %v", err)
+			}
+
+			got, err := client.ListOrgRepos(context.Background(), "cam3ron2")
+			if err != nil {
+				t.Fatalf("ListOrgRepos() unexpected error: %v", err)
+			}
+
+			if got.Status != tc.wantStatus {
+				t.Fatalf("Status = %q, want %q", got.Status, tc.wantStatus)
+			}
+			if doer.callCount != tc.wantCalls {
+				t.Fatalf("callCount = %d, want %d", doer.callCount, tc.wantCalls)
+			}
+
+			gotRepoNames := make([]string, 0, len(got.Repos))
+			for _, repo := range got.Repos {
+				gotRepoNames = append(gotRepoNames, repo.Name)
+			}
+			if !reflect.DeepEqual(gotRepoNames, tc.wantRepoNames) {
+				t.Fatalf("repo names = %v, want %v", gotRepoNames, tc.wantRepoNames)
 			}
 		})
 	}

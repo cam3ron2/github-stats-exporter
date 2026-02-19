@@ -173,20 +173,42 @@ func NewDataClient(baseURL string, requestClient *Client) (*DataClient, error) {
 	}, nil
 }
 
-// ListOrgRepos lists repositories in one GitHub organization with pagination support.
+// ListOrgRepos lists repositories for an organization and falls back to user repositories on 404.
 func (c *DataClient) ListOrgRepos(ctx context.Context, org string) (OrgReposResult, error) {
 	trimmedOrg := strings.TrimSpace(org)
 	if trimmedOrg == "" {
 		return OrgReposResult{}, fmt.Errorf("organization is required")
 	}
 
+	orgResult, err := c.listOwnerRepos(ctx, trimmedOrg, "orgs", "org")
+	if err != nil {
+		return OrgReposResult{}, err
+	}
+	if orgResult.Status != EndpointStatusNotFound {
+		return orgResult, nil
+	}
+
+	userResult, err := c.listOwnerRepos(ctx, trimmedOrg, "users", "user")
+	if err != nil {
+		return OrgReposResult{}, err
+	}
+	userResult.Metadata = mergeMetadata(orgResult.Metadata, userResult.Metadata)
+	return userResult, nil
+}
+
+func (c *DataClient) listOwnerRepos(
+	ctx context.Context,
+	owner string,
+	ownerPathSegment string,
+	ownerLabel string,
+) (OrgReposResult, error) {
 	result := OrgReposResult{
 		Status: EndpointStatusOK,
 	}
 	page := 1
 	for {
 		reqURL := c.cloneBaseURL()
-		reqURL.Path = joinURLPath(reqURL.Path, "orgs", url.PathEscape(trimmedOrg), "repos")
+		reqURL.Path = joinURLPath(reqURL.Path, ownerPathSegment, url.PathEscape(owner), "repos")
 		query := reqURL.Query()
 		query.Set("per_page", "100")
 		query.Set("page", strconv.Itoa(page))
@@ -195,16 +217,16 @@ func (c *DataClient) ListOrgRepos(ctx context.Context, org string) (OrgReposResu
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL.String(), nil)
 		if err != nil {
-			return OrgReposResult{}, fmt.Errorf("build list org repos request: %w", err)
+			return OrgReposResult{}, fmt.Errorf("build list %s repos request: %w", ownerLabel, err)
 		}
 
 		resp, metadata, err := c.requestClient.Do(req)
 		result.Metadata = mergeMetadata(result.Metadata, metadata)
 		if err != nil {
-			return OrgReposResult{}, fmt.Errorf("list org repos request failed: %w", err)
+			return OrgReposResult{}, fmt.Errorf("list %s repos request failed: %w", ownerLabel, err)
 		}
 		if resp == nil {
-			return OrgReposResult{}, fmt.Errorf("list org repos request failed: nil response")
+			return OrgReposResult{}, fmt.Errorf("list %s repos request failed: nil response", ownerLabel)
 		}
 
 		status := endpointStatusFromHTTP(resp.StatusCode)
@@ -754,10 +776,15 @@ func endpointStatusFromHTTP(statusCode int) EndpointStatus {
 }
 
 func decodeJSONAndClose(resp *http.Response, target any) error {
-	defer resp.Body.Close()
 	decoder := json.NewDecoder(resp.Body)
 	if err := decoder.Decode(target); err != nil {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			return fmt.Errorf("decode response body: %w (close body: %v)", err, closeErr)
+		}
 		return err
+	}
+	if err := resp.Body.Close(); err != nil {
+		return fmt.Errorf("close response body: %w", err)
 	}
 	return nil
 }

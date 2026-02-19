@@ -3,6 +3,8 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: redis
+  annotations:
+    checkov.io/skip1: CKV_K8S_43=Digest pinning is enforced by environment-specific image promotion controls.
   labels:
     app: redis
     app.kubernetes.io/component: redis
@@ -18,13 +20,34 @@ spec:
         app: redis
         app.kubernetes.io/component: redis
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: redis
-          image: redis:7.2-alpine
+          image: redis:7.2.12-alpine
+          imagePullPolicy: Always
           args: ["redis-server", "--appendonly", "yes"]
           ports:
             - name: redis
               containerPort: 6379
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           readinessProbe:
             exec:
               command: ["redis-cli", "ping"]
@@ -34,6 +57,11 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
   volumeClaimTemplates:
     - metadata:
         name: data

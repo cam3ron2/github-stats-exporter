@@ -3,6 +3,7 @@ module github.com/cam3ron2/github-stats-exporter
 go 1.25.0
 
 require (
+	github.com/alicebob/miniredis/v2 v2.36.1
 	github.com/bradleyfalzon/ghinstallation/v2 v2.17.0
 	github.com/go-chi/chi/v5 v5.2.4
 	github.com/google/go-github/v75 v75.0.0
@@ -28,6 +29,7 @@ require (
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.66.1 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect
+	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel/metric v1.39.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect

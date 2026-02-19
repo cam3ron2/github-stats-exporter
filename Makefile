@@ -14,6 +14,15 @@ endif
 BINARY_NAME := github-stats-exporter
 CMD_SOURCE  := ./cmd/github-stats-exporter
 DOCKER_TAG  := github-stats-exporter
+OCI_IMAGE_AUTHORS ?= cam3ron2
+OCI_IMAGE_URL ?= https://github.com/cam3ron2/github-stats-exporter
+OCI_IMAGE_DOCUMENTATION ?= https://github.com/cam3ron2/github-stats-exporter/blob/main/README.md
+OCI_IMAGE_SOURCE ?= https://github.com/cam3ron2/github-stats-exporter
+OCI_IMAGE_REVISION ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
+OCI_IMAGE_VERSION ?= dev
+OCI_IMAGE_CREATED ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+OCI_IMAGE_TITLE ?= github-stats-exporter
+OCI_IMAGE_DESCRIPTION ?= GitHub activity metrics exporter in OpenMetrics format.
 
 ifndef NOCOLOR
   GREEN  := $(shell tput -Txterm setaf 2)
@@ -31,13 +40,25 @@ GO := env -u GOROOT GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go
 .PHONY: default
 default: help
 
-.PHONY: test build run fmt compose
+.PHONY: test test-e2e test-e2e-live build run fmt compose
 
 ## Run all unit tests.
 .PHONY: test
 test:
 	@echo "${YELLOW}[TEST] ${GREEN}Start Running unit tests.${RESET}"
 	$(call quiet-command,$(GO) test -race -v -count=1 -timeout 45s ./...)
+
+## Run deterministic end-to-end tests.
+.PHONY: test-e2e
+test-e2e:
+	@echo "${YELLOW}[TEST] ${GREEN}Start running deterministic e2e tests.${RESET}"
+	$(call quiet-command,$(GO) test -tags=e2e -race -v -count=1 -timeout 240s ./test/e2e/...)
+
+## Run live end-to-end scrape tests using config/local.yaml and local app keys.
+.PHONY: test-e2e-live
+test-e2e-live:
+	@echo "${YELLOW}[TEST] ${GREEN}Start running live e2e scrape tests.${RESET}"
+	$(call quiet-command,$(GO) test -tags='e2e live' -race -v -count=1 -timeout 600s -run '^TestLiveScrapeFromLocalConfig$$' ./test/e2e/...)
 
 ## Run the application
 .PHONY: run
@@ -76,7 +97,16 @@ build :
 .PHONY: build-docker
 build-docker :
 	@echo "${YELLOW}[RUN] ${GREEN}Building docker image.${RESET}"
-	docker build . -t $(DOCKER_TAG)
+	docker build . -t $(DOCKER_TAG) \
+		--build-arg OCI_IMAGE_AUTHORS="$(OCI_IMAGE_AUTHORS)" \
+		--build-arg OCI_IMAGE_URL="$(OCI_IMAGE_URL)" \
+		--build-arg OCI_IMAGE_DOCUMENTATION="$(OCI_IMAGE_DOCUMENTATION)" \
+		--build-arg OCI_IMAGE_SOURCE="$(OCI_IMAGE_SOURCE)" \
+		--build-arg OCI_IMAGE_REVISION="$(OCI_IMAGE_REVISION)" \
+		--build-arg OCI_IMAGE_VERSION="$(OCI_IMAGE_VERSION)" \
+		--build-arg OCI_IMAGE_CREATED="$(OCI_IMAGE_CREATED)" \
+		--build-arg OCI_IMAGE_TITLE="$(OCI_IMAGE_TITLE)" \
+		--build-arg OCI_IMAGE_DESCRIPTION="$(OCI_IMAGE_DESCRIPTION)"
 
 ## Run the container locally via Docker Compose
 .PHONY: compose
@@ -93,7 +123,7 @@ lint-go:
 .PHONY: gitleaks
 gitleaks:
 	@echo "${YELLOW}[LINT] ${GREEN}Start gitleaks.${RESET}"
-	$(call quiet-command,gitleaks -c .github/linters/.gitleaks.toml dir .)
+	$(call quiet-command,gitleaks --log-level info -v -c .github/linters/.gitleaks.toml dir .)
 
 .PHONY: lint-yaml
 lint-yaml:
@@ -184,6 +214,7 @@ clean :
 	$(call rm-command,cover.out)
 	$(call rm-command,.gocache)
 	$(call rm-command,.gomodcache)
+	$(call rm-command,.golangci-cache)
 
 ## Display help for all targets
 .PHONY: help

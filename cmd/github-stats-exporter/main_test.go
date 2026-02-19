@@ -1,7 +1,10 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"os"
+	"syscall"
 	"testing"
 
 	"github.com/cam3ron2/github-stats-exporter/internal/config"
@@ -31,6 +34,54 @@ func TestLogLevel(t *testing.T) {
 			got := logLevel(tc.input)
 			if got != tc.want {
 				t.Fatalf("logLevel(%q) = %v, want %v", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestShouldIgnoreLoggerSyncError(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "nil_error",
+			err:  nil,
+			want: false,
+		},
+		{
+			name: "einval_direct",
+			err:  syscall.EINVAL,
+			want: true,
+		},
+		{
+			name: "enotty_direct",
+			err:  syscall.ENOTTY,
+			want: true,
+		},
+		{
+			name: "wrapped_einval",
+			err:  fmt.Errorf("wrapped: %w", syscall.EINVAL),
+			want: true,
+		},
+		{
+			name: "other_error",
+			err:  errors.New("boom"),
+			want: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := shouldIgnoreLoggerSyncError(tc.err)
+			if got != tc.want {
+				t.Fatalf("shouldIgnoreLoggerSyncError(%v) = %t, want %t", tc.err, got, tc.want)
 			}
 		})
 	}

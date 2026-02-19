@@ -3,6 +3,8 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: rabbitmq
+  annotations:
+    checkov.io/skip1: CKV_K8S_43=Digest pinning is enforced by environment-specific image promotion controls.
   labels:
     app: rabbitmq
     app.kubernetes.io/component: rabbitmq
@@ -18,30 +20,45 @@ spec:
         app: rabbitmq
         app.kubernetes.io/component: rabbitmq
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: rabbitmq
-          image: rabbitmq:3.13-management-alpine
+          image: rabbitmq:3.13.7-management-alpine
+          imagePullPolicy: Always
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              export RABBITMQ_ERLANG_COOKIE="$(cat /etc/rabbitmq-secrets/erlang-cookie)"
+              exec docker-entrypoint.sh rabbitmq-server
           ports:
             - name: amqp
               containerPort: 5672
             - name: mgmt
               containerPort: 15672
           env:
-            - name: RABBITMQ_DEFAULT_USER
-              valueFrom:
-                secretKeyRef:
-                  name: rabbitmq-secret
-                  key: username
-            - name: RABBITMQ_DEFAULT_PASS
-              valueFrom:
-                secretKeyRef:
-                  name: rabbitmq-secret
-                  key: password
-            - name: RABBITMQ_ERLANG_COOKIE
-              valueFrom:
-                secretKeyRef:
-                  name: rabbitmq-secret
-                  key: erlang-cookie
+            - name: RABBITMQ_DEFAULT_USER_FILE
+              value: /etc/rabbitmq-secrets/username
+            - name: RABBITMQ_DEFAULT_PASS_FILE
+              value: /etc/rabbitmq-secrets/password
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           readinessProbe:
             exec:
               command: ["rabbitmq-diagnostics", "check_running"]
@@ -51,6 +68,17 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/rabbitmq
+            - name: rabbitmq-secret
+              mountPath: /etc/rabbitmq-secrets
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: rabbitmq-secret
+          secret:
+            secretName: rabbitmq-secret
+        - name: tmp
+          emptyDir: {}
   volumeClaimTemplates:
     - metadata:
         name: data

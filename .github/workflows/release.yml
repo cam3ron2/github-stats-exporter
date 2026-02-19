@@ -109,6 +109,9 @@ jobs:
             type=raw,value=${{ needs.semantic-release.outputs.release_git_tag }}
             type=raw,value=${{ needs.semantic-release.outputs.release_version }}
             type=raw,value=latest
+      - name: Prepare OCI build args
+        id: oci
+        run: echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -118,6 +121,16 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            OCI_IMAGE_AUTHORS=cam3ron2
+            OCI_IMAGE_URL=https://github.com/${{ github.repository }}
+            OCI_IMAGE_DOCUMENTATION=https://github.com/${{ github.repository }}/blob/main/README.md
+            OCI_IMAGE_SOURCE=https://github.com/${{ github.repository }}
+            OCI_IMAGE_REVISION=${{ github.sha }}
+            OCI_IMAGE_VERSION=${{ needs.semantic-release.outputs.release_version }}
+            OCI_IMAGE_CREATED=${{ steps.oci.outputs.created }}
+            OCI_IMAGE_TITLE=github-stats-exporter
+            OCI_IMAGE_DESCRIPTION=GitHub activity metrics exporter in OpenMetrics format.
   update-gitops-manifest:
     name: Update GitOps Manifest
     runs-on: ubuntu-latest

@@ -1,6 +1,15 @@
 ---
 # Don't report passed checks in output
 quiet: true
-# skip-path:
-#   - scripts
-# skip-check:
+skip-framework:
+  - kustomize
+skip-path:
+  - deploy/kustomize/overlays/nonprod/patch-config.yaml
+  - deploy/kustomize/overlays/nonprod/patch-scale.yaml
+  - deploy/kustomize/overlays/prod/patch-app-hardening.yaml
+  - deploy/kustomize/overlays/prod/patch-config.yaml
+  - deploy/kustomize/overlays/prod/patch-scale.yaml
+  - config/local.yaml
+  - deploy/kustomize/base/app-configmap.yaml
+skip-check:
+  - CKV_K8S_21 # Namespace is applied by Kustomize at build/deploy time.

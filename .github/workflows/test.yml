@@ -35,85 +35,59 @@ jobs:
       - name: Run unit tests
         run: env -u GOROOT go test -race -count=1 -timeout 90s ./...
   e2e-tests:
-    name: E2E Tests
+    name: E2E Tests (Deterministic)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      CI_GITHUB_APP_ORG: ${{ secrets.CI_GITHUB_APP_ORG }}
-      CI_GITHUB_APP_ID: ${{ secrets.CI_GITHUB_APP_ID }}
-      CI_GITHUB_APP_INSTALLATION_ID: ${{ secrets.CI_GITHUB_APP_INSTALLATION_ID }}
+    timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+      - name: Run deterministic E2E tests
+        run: env -u GOROOT go test -tags=e2e -race -count=1 -timeout 180s ./test/e2e/...
+  e2e-live-tests:
+    name: E2E Tests (Live Scrape)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
       - name: Import GPG key
         uses: crazy-max/ghaction-import-gpg@v6
         with:
           gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
           passphrase: ${{ secrets.GPG_PASSPHRASE }}
-      - name: Decrypt GitHub App Key
+      - name: Decrypt GitHub App Keys
         run: |
+          set -euo pipefail
           mkdir -p config/keys
           gpg --batch --yes --decrypt \
             --output config/keys/gh-app-key.pem \
             config/keys/gh-app-key.gpg
           chmod 600 config/keys/gh-app-key.pem
-      - name: Show Docker versions
+          gpg --batch --yes --decrypt \
+            --output config/keys/gh-app-key-org.pem \
+            config/keys/gh-app-key-org.gpg
+          chmod 600 config/keys/gh-app-key-org.pem
+      - name: Print key fingerprints (debug)
         run: |
-          docker version
-          docker compose version
-      - name: Prepare CI GitHub App credentials
-        run: |
-          for value_name in CI_GITHUB_APP_ORG CI_GITHUB_APP_ID CI_GITHUB_APP_INSTALLATION_ID; do
-            if [ -z "${!value_name}" ]; then
-              echo "missing required secret: ${value_name}"
-              exit 1
-            fi
-          done
-
-          python3 - <<'PY'
-          import os
-          import re
-          from pathlib import Path
-
-          source_path = Path("config/local.yaml")
-          rendered = source_path.read_text(encoding="utf-8")
-          updates = [
-              (
-                  r'(?m)^(\s*(?:-\s*)?org:\s*).+$',
-                  lambda m: f'{m.group(1)}"{os.environ["CI_GITHUB_APP_ORG"]}"',
-              ),
-              (r'(?m)^(\s*app_id:\s*).+$', lambda m: f'{m.group(1)}{os.environ["CI_GITHUB_APP_ID"]}'),
-              (
-                  r'(?m)^(\s*installation_id:\s*).+$',
-                  lambda m: f'{m.group(1)}{os.environ["CI_GITHUB_APP_INSTALLATION_ID"]}',
-              ),
-              (r'(?m)^(\s*private_key_path:\s*).+$', lambda m: f'{m.group(1)}"/app/keys/gh-app-key.pem"'),
-          ]
-
-          for pattern, build_replacement in updates:
-              rendered, count = re.subn(pattern, build_replacement, rendered, count=1)
-              if count != 1:
-                  raise SystemExit(f"expected to patch one field for pattern: {pattern}")
-
-          Path("config/ci.yaml").write_text(rendered, encoding="utf-8")
-          PY
-      - name: Start stack
-        env:
-          GITHUB_STATS_CONFIG_PATH: ./config/ci.yaml
-        run: docker compose up -d --build
-      - name: Wait for leader and follower readiness
-        run: |
-          timeout 240 bash -c "until curl -fsS http://localhost:8080/readyz >/dev/null; do sleep 2; done"
-          timeout 240 bash -c "until curl -fsS http://localhost:8081/readyz >/dev/null; do sleep 2; done"
-      - name: Run compose functional checks
-        env:
-          GITHUB_STATS_CONFIG_PATH: ./config/ci.yaml
-        run: ./scripts/compose-functional-check.sh
-      - name: Dump compose logs on failure
-        if: failure()
-        run: docker compose logs --no-color --tail=400
-      - name: Tear down stack
+          set -euo pipefail
+          echo "gh-app-key.pem fingerprint:"
+          openssl pkey -in config/keys/gh-app-key.pem -pubout -outform DER | sha256sum
+          echo "gh-app-key-org.pem fingerprint:"
+          openssl pkey -in config/keys/gh-app-key-org.pem -pubout -outform DER | sha256sum
+      - name: Run live E2E scrape tests
+        run: make test-e2e-live
+      - name: Cleanup decrypted keys
         if: always()
-        env:
-          GITHUB_STATS_CONFIG_PATH: ./config/ci.yaml
-        run: docker compose down -v --remove-orphans
+        run: rm -f config/keys/gh-app-key.pem config/keys/gh-app-key-org.pem

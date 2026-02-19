@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"flag"
 	"fmt"
 	"net/http"
@@ -58,6 +59,9 @@ func run() error {
 	}
 	defer func() {
 		if syncErr := logger.Sync(); syncErr != nil {
+			if shouldIgnoreLoggerSyncError(syncErr) {
+				return
+			}
 			_, _ = fmt.Fprintf(os.Stderr, "github-stats-exporter: logger sync failed: %v\n", syncErr)
 		}
 	}()
@@ -233,4 +237,11 @@ func logLevel(raw string) zapcore.Level {
 	default:
 		return zapcore.InfoLevel
 	}
+}
+
+func shouldIgnoreLoggerSyncError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTTY)
 }
