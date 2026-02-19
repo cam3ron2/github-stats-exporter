@@ -565,10 +565,296 @@ func TestRabbitMQHTTPBrokerEmitsTracingSpans(t *testing.T) {
 	}
 }
 
+func TestRabbitMQHTTPBrokerOldestAge(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.February, 19, 12, 0, 0, 0, time.UTC)
+
+	testCases := []struct {
+		name       string
+		headValue  string
+		want       time.Duration
+		statusCode int
+	}{
+		{
+			name:      "rfc3339_timestamp",
+			headValue: "2026-02-19T11:59:00Z",
+			want:      time.Minute,
+		},
+		{
+			name:      "unix_timestamp",
+			headValue: "1739966340",
+			want:      now.Sub(time.Unix(1739966340, 0).UTC()),
+		},
+		{
+			name:      "future_timestamp_returns_zero",
+			headValue: "2099-01-01T00:00:00Z",
+			want:      0,
+		},
+		{
+			name:       "queue_info_failure_returns_zero",
+			headValue:  "2026-02-19T11:59:00Z",
+			want:       0,
+			statusCode: http.StatusServiceUnavailable,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			statusCode := tc.statusCode
+			if statusCode == 0 {
+				statusCode = http.StatusOK
+			}
+			client := &http.Client{
+				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					if req.Method != http.MethodGet {
+						return jsonResponse(http.StatusMethodNotAllowed, map[string]any{"error": "method"}), nil
+					}
+					if statusCode != http.StatusOK {
+						return jsonResponse(statusCode, map[string]any{"error": "unavailable"}), nil
+					}
+					if tc.headValue == "1739966340" {
+						return jsonResponse(http.StatusOK, map[string]any{"head_message_timestamp": float64(1739966340)}), nil
+					}
+					return jsonResponse(http.StatusOK, map[string]any{"head_message_timestamp": tc.headValue}), nil
+				}),
+			}
+
+			broker, err := NewRabbitMQHTTPBroker(RabbitMQHTTPConfig{
+				ManagementURL: "http://rabbitmq.local",
+				VHost:         "/",
+				Exchange:      "gh.backfill",
+				HTTPClient:    client,
+			})
+			if err != nil {
+				t.Fatalf("NewRabbitMQHTTPBroker() unexpected error: %v", err)
+			}
+
+			got := broker.OldestAge("gh.backfill.jobs", now)
+			if got != tc.want {
+				t.Fatalf("OldestAge() = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseHeadMessageTimestamp(t *testing.T) {
+	t.Parallel()
+
+	want := time.Date(2026, time.February, 19, 12, 0, 0, 0, time.UTC)
+	testCases := []struct {
+		name   string
+		raw    any
+		want   time.Time
+		isZero bool
+	}{
+		{
+			name: "rfc3339nano",
+			raw:  "2026-02-19T12:00:00.000000000Z",
+			want: want,
+		},
+		{
+			name: "rfc3339",
+			raw:  "2026-02-19T12:00:00Z",
+			want: want,
+		},
+		{
+			name: "float_seconds",
+			raw:  float64(1771502400),
+			want: time.Unix(1771502400, 0).UTC(),
+		},
+		{
+			name:   "invalid_string",
+			raw:    "not-a-time",
+			isZero: true,
+		},
+		{
+			name:   "zero_seconds",
+			raw:    float64(0),
+			isZero: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := parseHeadMessageTimestamp(tc.raw)
+			if tc.isZero {
+				if !got.IsZero() {
+					t.Fatalf("parseHeadMessageTimestamp(%v) = %s, want zero", tc.raw, got)
+				}
+				return
+			}
+			if !got.Equal(tc.want) {
+				t.Fatalf("parseHeadMessageTimestamp(%v) = %s, want %s", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRabbitMQHTTPBrokerDoJSONErrorPaths(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name         string
+		endpoint     string
+		body         any
+		decodeTarget any
+		client       *http.Client
+		wantErr      bool
+		errContains  string
+	}{
+		{
+			name:         "marshal_error",
+			endpoint:     "http://rabbitmq.local/api/path",
+			body:         map[string]any{"bad": func() {}},
+			decodeTarget: nil,
+			client:       &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, nil })},
+			wantErr:      true,
+			errContains:  "marshal rabbitmq request body",
+		},
+		{
+			name:         "invalid_endpoint",
+			endpoint:     "://bad-endpoint",
+			body:         nil,
+			decodeTarget: nil,
+			client:       &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, nil })},
+			wantErr:      true,
+			errContains:  "create rabbitmq request",
+		},
+		{
+			name:         "execute_error",
+			endpoint:     "http://rabbitmq.local/api/path",
+			body:         nil,
+			decodeTarget: nil,
+			client: &http.Client{
+				Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+					return nil, io.ErrUnexpectedEOF
+				}),
+			},
+			wantErr:     true,
+			errContains: "execute rabbitmq request",
+		},
+		{
+			name:         "non_2xx_body_read_error",
+			endpoint:     "http://rabbitmq.local/api/path",
+			body:         nil,
+			decodeTarget: nil,
+			client: &http.Client{
+				Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusBadGateway,
+						Body:       &failingReadCloser{},
+						Header:     make(http.Header),
+					}, nil
+				}),
+			},
+			wantErr:     true,
+			errContains: "body-read-error",
+		},
+		{
+			name:         "non_2xx_with_body",
+			endpoint:     "http://rabbitmq.local/api/path",
+			body:         nil,
+			decodeTarget: nil,
+			client: &http.Client{
+				Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusBadRequest,
+						Body:       io.NopCloser(strings.NewReader("invalid request")),
+						Header:     make(http.Header),
+					}, nil
+				}),
+			},
+			wantErr:     true,
+			errContains: "status=400 body=invalid request",
+		},
+		{
+			name:         "decode_error",
+			endpoint:     "http://rabbitmq.local/api/path",
+			body:         nil,
+			decodeTarget: &map[string]any{},
+			client: &http.Client{
+				Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader("{")),
+						Header:     make(http.Header),
+					}, nil
+				}),
+			},
+			wantErr:     true,
+			errContains: "decode rabbitmq response",
+		},
+		{
+			name:         "success",
+			endpoint:     "http://rabbitmq.local/api/path",
+			body:         map[string]any{"queue": "gh.backfill.jobs"},
+			decodeTarget: &map[string]any{},
+			client: &http.Client{
+				Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+						Header:     make(http.Header),
+					}, nil
+				}),
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			broker, err := NewRabbitMQHTTPBroker(RabbitMQHTTPConfig{
+				ManagementURL: "http://rabbitmq.local",
+				VHost:         "/",
+				Exchange:      "gh.backfill",
+				HTTPClient:    tc.client,
+			})
+			if err != nil {
+				t.Fatalf("NewRabbitMQHTTPBroker() unexpected error: %v", err)
+			}
+
+			err = broker.doJSON(context.Background(), http.MethodPost, tc.endpoint, tc.body, tc.decodeTarget)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("doJSON() expected error, got nil")
+				}
+				if tc.errContains != "" && !strings.Contains(err.Error(), tc.errContains) {
+					t.Fatalf("doJSON() error = %q, missing %q", err.Error(), tc.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("doJSON() unexpected error: %v", err)
+			}
+		})
+	}
+}
+
 type roundTripFunc func(req *http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return fn(req)
+}
+
+type failingReadCloser struct{}
+
+func (f *failingReadCloser) Read([]byte) (int, error) {
+	return 0, io.ErrUnexpectedEOF
+}
+
+func (f *failingReadCloser) Close() error {
+	return nil
 }
 
 func jsonResponse(statusCode int, payload any) *http.Response {

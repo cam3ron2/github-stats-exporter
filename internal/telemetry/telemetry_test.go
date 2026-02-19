@@ -86,8 +86,6 @@ func TestSetup(t *testing.T) {
 }
 
 func TestTraceModeNormalizationAndDependencyTracing(t *testing.T) {
-	t.Parallel()
-
 	testCases := []struct {
 		name                 string
 		mode                 string
@@ -117,8 +115,6 @@ func TestTraceModeNormalizationAndDependencyTracing(t *testing.T) {
 	for _, tc := range testCases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
 			setTraceMode(tc.mode)
 			if got := TraceMode(); got != tc.wantMode {
 				t.Fatalf("TraceMode() = %q, want %q", got, tc.wantMode)

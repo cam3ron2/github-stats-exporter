@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/cam3ron2/github-stats-exporter/internal/store"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func TestOpenMetricsHandler(t *testing.T) {
@@ -97,4 +98,42 @@ func TestOpenMetricsHandlerIncludesCacheMetrics(t *testing.T) {
 			t.Fatalf("metrics output missing %q:\n%s", substr, body)
 		}
 	}
+}
+
+func TestSnapshotCollectorHandlesNilAndInvalidPoints(t *testing.T) {
+	t.Parallel()
+
+	collector := &snapshotCollector{}
+	ch := make(chan prometheus.Metric, 1)
+	collector.Collect(ch)
+	close(ch)
+	if got := len(ch); got != 0 {
+		t.Fatalf("Collect(nil reader) metrics = %d, want 0", got)
+	}
+
+	reader := staticSnapshotReader{
+		points: []store.MetricPoint{
+			{
+				Name:      "",
+				Labels:    map[string]string{"org": "org-a"},
+				Value:     1,
+				UpdatedAt: time.Unix(1739836800, 0),
+			},
+		},
+	}
+	collector = &snapshotCollector{reader: reader}
+	ch = make(chan prometheus.Metric, 1)
+	collector.Collect(ch)
+	close(ch)
+	if got := len(ch); got != 0 {
+		t.Fatalf("Collect(invalid point) metrics = %d, want 0", got)
+	}
+}
+
+type staticSnapshotReader struct {
+	points []store.MetricPoint
+}
+
+func (r staticSnapshotReader) Snapshot() []store.MetricPoint {
+	return r.points
 }

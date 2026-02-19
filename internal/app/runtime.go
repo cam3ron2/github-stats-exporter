@@ -19,7 +19,10 @@ import (
 	"go.uber.org/zap"
 )
 
-const unknownLabelValue = "unknown"
+const (
+	unknownLabelValue        = "unknown"
+	defaultBackfillQueueName = "gh.backfill.jobs"
+)
 
 type runtimeStore interface {
 	UpsertMetric(role store.RuntimeRole, source store.WriteSource, point store.MetricPoint) error
@@ -1202,7 +1205,7 @@ func (r *Runtime) recordFollowerQueueAgeMetric(now time.Time) {
 func (r *Runtime) backfillQueueName() string {
 	queueName := strings.TrimSpace(r.cfg.AMQP.Queue)
 	if queueName == "" {
-		return "gh.backfill.jobs"
+		return defaultBackfillQueueName
 	}
 	return queueName
 }
