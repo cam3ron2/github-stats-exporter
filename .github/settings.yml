@@ -63,9 +63,9 @@ labels:
   - name: go
     color: "#000000"
     description: This issue is related to Go
-collaborators: []
-# See https://docs.github.com/en/rest/reference/teams#add-or-update-team-repository-permissions for available options
-teams: []
+# collaborators: []
+# # See https://docs.github.com/en/rest/reference/teams#add-or-update-team-repository-permissions for available options
+# teams: []
 # See https://docs.github.com/en/rest/repos/rules#update-a-repository-ruleset for
 # all available ruleset properties and a description of each.
 rulesets:
