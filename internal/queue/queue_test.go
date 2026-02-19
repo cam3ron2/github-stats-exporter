@@ -338,3 +338,73 @@ func TestInMemoryBrokerHealth(t *testing.T) {
 		t.Fatalf("Health(empty queue) expected error, got nil")
 	}
 }
+
+func TestInMemoryBrokerOldestAgeAndDepth(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1739836800, 0)
+	broker := NewInMemoryBroker(2)
+	ctx := context.Background()
+	if err := broker.Publish(ctx, "jobs", Message{ID: "m1", CreatedAt: now.Add(-2 * time.Minute)}); err != nil {
+		t.Fatalf("Publish(m1) unexpected error: %v", err)
+	}
+	if err := broker.Publish(ctx, "jobs", Message{ID: "m2", CreatedAt: now.Add(-time.Minute)}); err != nil {
+		t.Fatalf("Publish(m2) unexpected error: %v", err)
+	}
+
+	if got := broker.Depth("jobs"); got != 2 {
+		t.Fatalf("Depth(jobs) = %d, want 2", got)
+	}
+	if got := broker.OldestAge("jobs", now); got != 2*time.Minute {
+		t.Fatalf("OldestAge(jobs) = %s, want 2m", got)
+	}
+	if got := broker.OldestAge("jobs", now.Add(-3*time.Minute)); got != 0 {
+		t.Fatalf("OldestAge(before oldest) = %s, want 0", got)
+	}
+
+	broker.dequeueTimestamp("jobs")
+	if got := broker.OldestAge("jobs", now); got != time.Minute {
+		t.Fatalf("OldestAge(after dequeue) = %s, want 1m", got)
+	}
+	broker.dequeueTimestamp("jobs")
+	if got := broker.OldestAge("jobs", now); got != 0 {
+		t.Fatalf("OldestAge(after second dequeue) = %s, want 0", got)
+	}
+}
+
+func TestInMemoryBrokerNilGuards(t *testing.T) {
+	t.Parallel()
+
+	var broker *InMemoryBroker
+	if err := broker.Publish(context.Background(), "jobs", Message{ID: "m1"}); err == nil {
+		t.Fatalf("Publish(nil broker) expected error, got nil")
+	}
+	if err := broker.Health(context.Background(), "jobs"); err == nil {
+		t.Fatalf("Health(nil broker) expected error, got nil")
+	}
+	if got := broker.Depth("jobs"); got != 0 {
+		t.Fatalf("Depth(nil broker) = %d, want 0", got)
+	}
+	if got := broker.OldestAge("jobs", time.Now()); got != 0 {
+		t.Fatalf("OldestAge(nil broker) = %s, want 0", got)
+	}
+}
+
+func TestInMemoryBrokerEnqueueTimestampDefaultsNow(t *testing.T) {
+	t.Parallel()
+
+	broker := NewInMemoryBroker(1)
+	before := time.Now().UTC().Add(-time.Second)
+	broker.enqueueTimestamp("jobs", time.Time{})
+	after := time.Now().UTC().Add(time.Second)
+
+	broker.mu.RLock()
+	timestamps := append([]time.Time(nil), broker.times["jobs"]...)
+	broker.mu.RUnlock()
+	if len(timestamps) != 1 {
+		t.Fatalf("timestamps len = %d, want 1", len(timestamps))
+	}
+	if timestamps[0].Before(before) || timestamps[0].After(after) {
+		t.Fatalf("timestamp = %s, expected between %s and %s", timestamps[0], before, after)
+	}
+}

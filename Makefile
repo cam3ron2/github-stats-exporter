@@ -58,7 +58,7 @@ test-e2e:
 .PHONY: test-e2e-live
 test-e2e-live:
 	@echo "${YELLOW}[TEST] ${GREEN}Start running live e2e scrape tests.${RESET}"
-	$(call quiet-command,$(GO) test -tags='e2e live' -race -v -count=1 -timeout 600s -run '^TestLiveScrapeFromLocalConfig$$' ./test/e2e/...)
+	$(call quiet-command,$(GO) test -tags='e2e live' -race -v -count=1 -timeout 600s -run '^TestLive' ./test/e2e/...)
 
 ## Run the application
 .PHONY: run

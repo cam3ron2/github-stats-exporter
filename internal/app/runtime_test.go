@@ -499,6 +499,128 @@ func TestRuntimeRunLeaderCycleWritesOperationalMetrics(t *testing.T) {
 	}
 }
 
+func TestRuntimeRunLeaderCycleCopilotDependencyHealthSplit(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1739836800, 0)
+	testCases := []struct {
+		name        string
+		repo        string
+		reason      string
+		wantHealthy map[string]bool
+	}{
+		{
+			name:   "org_report_fetch_error_marks_org_and_download_unhealthy",
+			repo:   "__copilot__org__28d",
+			reason: "copilot_report_fetch_error",
+			wantHealthy: map[string]bool{
+				"github_api_core":                            true,
+				"github_api_copilot_org_reports":             false,
+				"github_api_copilot_org_user_reports":        true,
+				"github_api_copilot_enterprise_reports":      true,
+				"github_api_copilot_enterprise_user_reports": true,
+				"github_copilot_report_download":             false,
+			},
+		},
+		{
+			name:   "users_report_parse_error_marks_only_users_unhealthy",
+			repo:   "__copilot__users__28d",
+			reason: "copilot_report_parse_error",
+			wantHealthy: map[string]bool{
+				"github_api_core":                            true,
+				"github_api_copilot_org_reports":             true,
+				"github_api_copilot_org_user_reports":        false,
+				"github_api_copilot_enterprise_reports":      true,
+				"github_api_copilot_enterprise_user_reports": true,
+				"github_copilot_report_download":             true,
+			},
+		},
+		{
+			name:   "enterprise_report_download_error_marks_enterprise_and_download_unhealthy",
+			repo:   "__copilot__enterprise__28d",
+			reason: "copilot_report_download_error",
+			wantHealthy: map[string]bool{
+				"github_api_core":                            true,
+				"github_api_copilot_org_reports":             true,
+				"github_api_copilot_org_user_reports":        true,
+				"github_api_copilot_enterprise_reports":      false,
+				"github_api_copilot_enterprise_user_reports": true,
+				"github_copilot_report_download":             false,
+			},
+		},
+		{
+			name:   "enterprise_users_report_fetch_error_marks_enterprise_users_and_download_unhealthy",
+			repo:   "__copilot__enterprise_users__28d",
+			reason: "copilot_report_fetch_error",
+			wantHealthy: map[string]bool{
+				"github_api_core":                            true,
+				"github_api_copilot_org_reports":             true,
+				"github_api_copilot_org_user_reports":        true,
+				"github_api_copilot_enterprise_reports":      true,
+				"github_api_copilot_enterprise_user_reports": false,
+				"github_copilot_report_download":             false,
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := testConfig()
+			runtime := NewRuntime(cfg, &fakeOrgScraper{
+				result: scrape.OrgResult{
+					MissedWindow: []scrape.MissedWindow{
+						{
+							Org:         "org-a",
+							Repo:        tc.repo,
+							WindowStart: now,
+							WindowEnd:   now,
+							Reason:      tc.reason,
+						},
+					},
+				},
+			})
+			runtime.Now = func() time.Time { return now }
+
+			if err := runtime.RunLeaderCycle(context.Background()); err != nil {
+				t.Fatalf("RunLeaderCycle() unexpected error: %v", err)
+			}
+
+			snapshot := runtime.Store().Snapshot()
+			for dependency, want := range tc.wantHealthy {
+				point := findMetricWithLabels(snapshot, "gh_exporter_dependency_health", map[string]string{
+					"dependency": dependency,
+				})
+				if point == nil {
+					t.Fatalf("missing dependency metric for %s", dependency)
+				}
+				got := point.Value == 1
+				if got != want {
+					t.Fatalf(
+						"dependency metric %s healthy=%t, want %t",
+						dependency,
+						got,
+						want,
+					)
+				}
+			}
+
+			status := runtime.CurrentStatus(context.Background())
+			for dependency, want := range tc.wantHealthy {
+				got, ok := status.Components[dependency]
+				if !ok {
+					t.Fatalf("status missing component %s", dependency)
+				}
+				if got != want {
+					t.Fatalf("status component %s=%t, want %t", dependency, got, want)
+				}
+			}
+		})
+	}
+}
+
 func TestRuntimeRunLeaderCycleWritesRateLimitMetrics(t *testing.T) {
 	t.Parallel()
 

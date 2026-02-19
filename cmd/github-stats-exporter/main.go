@@ -24,6 +24,13 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
+var (
+	// #nosec G101 -- Kubernetes service account file paths are fixed by cluster convention.
+	kubernetesServiceAccountTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	// #nosec G101 -- Kubernetes service account file paths are fixed by cluster convention.
+	kubernetesServiceAccountCAPath = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+)
+
 func main() {
 	if err := run(); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "github-stats-exporter: %v\n", err)
@@ -195,9 +202,7 @@ func inClusterKubernetesClient() (string, string, *http.Client, error) {
 		return "", "", nil, fmt.Errorf("kubernetes service host/port environment variables are not set")
 	}
 
-	// #nosec G101 -- Kubernetes service account token file path is fixed by cluster convention.
-	tokenPath := "/var/run/secrets/kubernetes.io/serviceaccount/token"
-	tokenBytes, err := os.ReadFile(tokenPath)
+	tokenBytes, err := os.ReadFile(filepath.Clean(kubernetesServiceAccountTokenPath))
 	if err != nil {
 		return "", "", nil, fmt.Errorf("read kubernetes service account token: %w", err)
 	}
@@ -206,8 +211,7 @@ func inClusterKubernetesClient() (string, string, *http.Client, error) {
 		return "", "", nil, fmt.Errorf("kubernetes service account token is empty")
 	}
 
-	caPath := "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-	caBytes, caErr := os.ReadFile(filepath.Clean(caPath))
+	caBytes, caErr := os.ReadFile(filepath.Clean(kubernetesServiceAccountCAPath))
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
 	if caErr == nil && len(caBytes) > 0 {
 		pool := x509.NewCertPool()

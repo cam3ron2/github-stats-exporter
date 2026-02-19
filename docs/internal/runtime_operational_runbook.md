@@ -31,6 +31,31 @@
 - If RabbitMQ queue init fails, runtime logs a warning and falls back to in-memory queue.
 - In-memory queue fallback is process-local only (not HA across replicas); treat this as degraded mode.
 
+## Copilot Report Egress Policy
+
+- Nonprod overlay keeps `443/TCP` open for signed URL hostname discovery.
+  - Manifest: `deploy/kustomize/overlays/nonprod/networkpolicy.yaml`
+- Prod overlay restricts `443/TCP` egress to GitHub-published API/web CIDRs
+  plus explicit DNS egress.
+  - Manifest: `deploy/kustomize/overlays/prod/networkpolicy.yaml`
+- Current GitHub Copilot domain families from `gh api /meta`:
+  - `*.github.com`
+  - `*.githubusercontent.com`
+  - `default.exp-tas.com`
+  - `*.githubcopilot.com`
+- Refresh CIDRs before a release:
+
+```bash
+gh api /meta --jq '([.api[], .web[]] | unique | .[])'
+```
+
+- Validate in-cluster egress when Copilot is enabled:
+  1. `gh_exporter_dependency_health{dependency="github_copilot_report_download"}`
+     remains `1`.
+  2. No sustained growth in
+     `gh_exporter_backfill_jobs_enqueued_total{reason="copilot_report_download_error"}`.
+  3. `/healthz?full=1` does not report Copilot download path degraded.
+
 ## Key Signals to Monitor
 
 - `gh_exporter_scrape_runs_total{org,result}`
@@ -43,6 +68,9 @@
 - `gh_exporter_github_rate_limit_reset_unixtime{org,installation_id}`
 - `gh_exporter_github_secondary_limit_hits_total{org}`
 - `gh_exporter_dependency_health{dependency}`
+- `gh_exporter_copilot_scrape_runs_total{scope,result}`
+- `gh_exporter_copilot_report_download_total{scope,result}`
+- `gh_exporter_copilot_records_dropped_total{scope,reason}`
 - `/healthz` JSON mode + component statuses
 
 Alert and recording rule source:

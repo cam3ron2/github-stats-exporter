@@ -98,6 +98,50 @@ func TestWrapHTTPHandlerByTraceMode(t *testing.T) {
 	}
 }
 
+func TestWrapHTTPHandlerNilHandlerAndStatusCapture(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name      string
+		traceMode string
+		route     string
+		handler   http.Handler
+		wantCode  int
+	}{
+		{
+			name:      "nil_handler_uses_not_found",
+			traceMode: "sampled",
+			route:     "metrics",
+			handler:   nil,
+			wantCode:  http.StatusNotFound,
+		},
+		{
+			name:      "empty_route_defaults_operation_name",
+			traceMode: "detailed",
+			route:     "",
+			handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+			}),
+			wantCode: http.StatusInternalServerError,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			wrapped := wrapHTTPHandler(tc.traceMode, tc.route, tc.handler)
+			req := httptest.NewRequest(http.MethodGet, "/test", nil)
+			rec := httptest.NewRecorder()
+			wrapped.ServeHTTP(rec, req)
+			if rec.Code != tc.wantCode {
+				t.Fatalf("status = %d, want %d", rec.Code, tc.wantCode)
+			}
+		})
+	}
+}
+
 type staticHandler struct{}
 
 func (h *staticHandler) ServeHTTP(w http.ResponseWriter, _ *http.Request) {

@@ -30,14 +30,15 @@ const (
 
 // Input represents dependency states used for health evaluation.
 type Input struct {
-	Role               Role
-	RedisHealthy       bool
-	AMQPHealthy        bool
-	SchedulerHealthy   bool
-	GitHubClientUsable bool
-	ConsumerHealthy    bool
-	ExporterHealthy    bool
-	GitHubHealthy      bool
+	Role                 Role
+	RedisHealthy         bool
+	AMQPHealthy          bool
+	SchedulerHealthy     bool
+	GitHubClientUsable   bool
+	ConsumerHealthy      bool
+	ExporterHealthy      bool
+	GitHubHealthy        bool
+	AdditionalComponents map[string]bool
 }
 
 // Status represents evaluated application health.
@@ -71,6 +72,9 @@ func (e *StatusEvaluator) Evaluate(input Input) Status {
 		"consumer":       input.ConsumerHealthy,
 		"exporter_cache": input.ExporterHealthy,
 		"github_healthy": input.GitHubHealthy,
+	}
+	for component, healthy := range input.AdditionalComponents {
+		components[component] = healthy
 	}
 
 	ready := input.RedisHealthy && input.AMQPHealthy && input.ExporterHealthy

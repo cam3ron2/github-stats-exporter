@@ -19,7 +19,10 @@ import (
 	"go.uber.org/zap"
 )
 
-const unknownLabelValue = "unknown"
+const (
+	unknownLabelValue        = "unknown"
+	defaultBackfillQueueName = "gh.backfill.jobs"
+)
 
 type runtimeStore interface {
 	UpsertMetric(role store.RuntimeRole, source store.WriteSource, point store.MetricPoint) error
@@ -53,18 +56,24 @@ type Runtime struct {
 	githubProbeURL    string
 	githubProbeClient *http.Client
 
-	mu                  sync.RWMutex
-	role                health.Role
-	redisHealthy        bool
-	amqpHealthy         bool
-	schedulerHealthy    bool
-	githubClientUsable  bool
-	consumerHealthy     bool
-	exporterHealthy     bool
-	githubHealthy       bool
-	githubCooldownUntil time.Time
-	githubFailureStreak int
-	githubRecoverStreak int
+	mu                                  sync.RWMutex
+	role                                health.Role
+	redisHealthy                        bool
+	amqpHealthy                         bool
+	schedulerHealthy                    bool
+	githubClientUsable                  bool
+	consumerHealthy                     bool
+	exporterHealthy                     bool
+	githubHealthy                       bool
+	githubCoreHealthy                   bool
+	githubCopilotOrgHealthy             bool
+	githubCopilotOrgUsersHealthy        bool
+	githubCopilotEnterpriseHealthy      bool
+	githubCopilotEnterpriseUsersHealthy bool
+	githubCopilotReportDownloadHealthy  bool
+	githubCooldownUntil                 time.Time
+	githubFailureStreak                 int
+	githubRecoverStreak                 int
 
 	leaderCancel   context.CancelFunc
 	followerCancel context.CancelFunc
@@ -118,21 +127,27 @@ func NewRuntime(cfg *config.Config, orgScraper scrape.OrgScraper, logger ...*zap
 	}
 
 	runtime := &Runtime{
-		cfg:                cfg,
-		store:              storeBackend,
-		queue:              queueBackend,
-		dispatcher:         dispatcher,
-		scrapeMgr:          scrape.NewManager(orgScraper, cfg.GitHub.Orgs),
-		evaluator:          health.NewStatusEvaluator(),
-		logger:             baseLogger,
-		noopScraper:        noopScraper,
-		role:               health.RoleFollower,
-		redisHealthy:       true,
-		amqpHealthy:        true,
-		exporterHealthy:    true,
-		githubHealthy:      true,
-		githubClientUsable: true,
-		Now:                time.Now,
+		cfg:                                 cfg,
+		store:                               storeBackend,
+		queue:                               queueBackend,
+		dispatcher:                          dispatcher,
+		scrapeMgr:                           scrape.NewManager(orgScraper, cfg.GitHub.Orgs),
+		evaluator:                           health.NewStatusEvaluator(),
+		logger:                              baseLogger,
+		noopScraper:                         noopScraper,
+		role:                                health.RoleFollower,
+		redisHealthy:                        true,
+		amqpHealthy:                         true,
+		exporterHealthy:                     true,
+		githubHealthy:                       true,
+		githubCoreHealthy:                   true,
+		githubCopilotOrgHealthy:             true,
+		githubCopilotOrgUsersHealthy:        true,
+		githubCopilotEnterpriseHealthy:      true,
+		githubCopilotEnterpriseUsersHealthy: true,
+		githubCopilotReportDownloadHealthy:  true,
+		githubClientUsable:                  true,
+		Now:                                 time.Now,
 	}
 	runtime.githubProbeURL = buildGitHubMetaProbeURL(cfg.GitHub.APIBaseURL)
 	runtime.githubProbeClient = &http.Client{Timeout: probeTimeout}
@@ -344,15 +359,24 @@ func (r *Runtime) StopFollower() {
 // CurrentStatus returns current health status.
 func (r *Runtime) CurrentStatus(_ context.Context) health.Status {
 	r.mu.RLock()
+	additional := map[string]bool{
+		"github_api_core":                            r.githubCoreHealthy,
+		"github_api_copilot_org_reports":             r.githubCopilotOrgHealthy,
+		"github_api_copilot_org_user_reports":        r.githubCopilotOrgUsersHealthy,
+		"github_api_copilot_enterprise_reports":      r.githubCopilotEnterpriseHealthy,
+		"github_api_copilot_enterprise_user_reports": r.githubCopilotEnterpriseUsersHealthy,
+		"github_copilot_report_download":             r.githubCopilotReportDownloadHealthy,
+	}
 	input := health.Input{
-		Role:               r.role,
-		RedisHealthy:       r.redisHealthy,
-		AMQPHealthy:        r.amqpHealthy,
-		SchedulerHealthy:   r.schedulerHealthy,
-		GitHubClientUsable: r.githubClientUsable,
-		ConsumerHealthy:    r.consumerHealthy,
-		ExporterHealthy:    r.exporterHealthy,
-		GitHubHealthy:      r.githubHealthy,
+		Role:                 r.role,
+		RedisHealthy:         r.redisHealthy,
+		AMQPHealthy:          r.amqpHealthy,
+		SchedulerHealthy:     r.schedulerHealthy,
+		GitHubClientUsable:   r.githubClientUsable,
+		ConsumerHealthy:      r.consumerHealthy,
+		ExporterHealthy:      r.exporterHealthy,
+		GitHubHealthy:        r.githubHealthy,
+		AdditionalComponents: additional,
 	}
 	r.mu.RUnlock()
 	return r.evaluator.Evaluate(input)
@@ -392,6 +416,11 @@ func (r *Runtime) processLeaderOutcomes(now time.Time, cycleStart time.Time, out
 	backfillEnqueued := 0
 	storeWriteSuccess := 0
 	storeWriteFailure := 0
+	copilotOrgHealthy := true
+	copilotOrgUsersHealthy := true
+	copilotEnterpriseHealthy := true
+	copilotEnterpriseUsersHealthy := true
+	copilotReportDownloadHealthy := true
 
 	if len(outcomes) == 0 {
 		r.logger.Debug("leader scrape cycle produced no outcomes")
@@ -504,6 +533,27 @@ func (r *Runtime) processLeaderOutcomes(now time.Time, cycleStart time.Time, out
 			if reason == "" {
 				reason = "partial_scrape_error"
 			}
+			if strings.HasPrefix(reason, "copilot_report_") {
+				scope, ok := copilotScopeFromRepoKey(missed.Repo)
+				if ok {
+					switch scope {
+					case "org":
+						copilotOrgHealthy = false
+					case "users":
+						copilotOrgUsersHealthy = false
+					case "enterprise":
+						copilotEnterpriseHealthy = false
+					case "enterprise_users":
+						copilotEnterpriseUsersHealthy = false
+					}
+				}
+				if reason == "copilot_report_download_error" {
+					copilotReportDownloadHealthy = false
+				}
+				if reason == "copilot_report_fetch_error" {
+					copilotReportDownloadHealthy = false
+				}
+			}
 
 			enqueueResult := r.dispatcher.EnqueueMissing(backfill.MessageInput{
 				Org:         messageOrg,
@@ -574,6 +624,12 @@ func (r *Runtime) processLeaderOutcomes(now time.Time, cycleStart time.Time, out
 
 	r.mu.Lock()
 	r.updateGitHubHealthLocked(r.Now(), orgFailures == 0)
+	r.githubCoreHealthy = orgFailures == 0
+	r.githubCopilotOrgHealthy = copilotOrgHealthy
+	r.githubCopilotOrgUsersHealthy = copilotOrgUsersHealthy
+	r.githubCopilotEnterpriseHealthy = copilotEnterpriseHealthy
+	r.githubCopilotEnterpriseUsersHealthy = copilotEnterpriseUsersHealthy
+	r.githubCopilotReportDownloadHealthy = copilotReportDownloadHealthy
 	r.mu.Unlock()
 	r.mu.RLock()
 	currentGitHubHealthy := r.githubHealthy
@@ -842,6 +898,14 @@ func (r *Runtime) probeDependencies(ctx context.Context) {
 	r.redisHealthy = redisHealthy
 	r.amqpHealthy = amqpHealthy
 	r.updateGitHubHealthLocked(r.Now(), githubHealthy)
+	r.githubCoreHealthy = githubHealthy
+	if !githubHealthy {
+		r.githubCopilotOrgHealthy = false
+		r.githubCopilotOrgUsersHealthy = false
+		r.githubCopilotEnterpriseHealthy = false
+		r.githubCopilotEnterpriseUsersHealthy = false
+		r.githubCopilotReportDownloadHealthy = false
+	}
 	r.mu.Unlock()
 }
 
@@ -1141,7 +1205,7 @@ func (r *Runtime) recordFollowerQueueAgeMetric(now time.Time) {
 func (r *Runtime) backfillQueueName() string {
 	queueName := strings.TrimSpace(r.cfg.AMQP.Queue)
 	if queueName == "" {
-		return "gh.backfill.jobs"
+		return defaultBackfillQueueName
 	}
 	return queueName
 }
@@ -1200,12 +1264,18 @@ func (r *Runtime) updateGitHubHealthLocked(now time.Time, cycleSuccessful bool) 
 func (r *Runtime) recordDependencyHealthMetrics(now time.Time) {
 	r.mu.RLock()
 	components := map[string]bool{
-		"redis":     r.redisHealthy,
-		"amqp":      r.amqpHealthy,
-		"scheduler": r.schedulerHealthy,
-		"github":    r.githubHealthy,
-		"consumer":  r.consumerHealthy,
-		"exporter":  r.exporterHealthy,
+		"redis":                                 r.redisHealthy,
+		"amqp":                                  r.amqpHealthy,
+		"scheduler":                             r.schedulerHealthy,
+		"github":                                r.githubHealthy,
+		"github_api_core":                       r.githubCoreHealthy,
+		"github_api_copilot_org_reports":        r.githubCopilotOrgHealthy,
+		"github_api_copilot_org_user_reports":   r.githubCopilotOrgUsersHealthy,
+		"github_api_copilot_enterprise_reports": r.githubCopilotEnterpriseHealthy,
+		"github_api_copilot_enterprise_user_reports": r.githubCopilotEnterpriseUsersHealthy,
+		"github_copilot_report_download":             r.githubCopilotReportDownloadHealthy,
+		"consumer":                                   r.consumerHealthy,
+		"exporter":                                   r.exporterHealthy,
 	}
 	r.mu.RUnlock()
 
@@ -1218,4 +1288,20 @@ func (r *Runtime) recordDependencyHealthMetrics(now time.Time) {
 			"dependency": dependency,
 		})
 	}
+}
+
+func copilotScopeFromRepoKey(repo string) (string, bool) {
+	trimmed := strings.TrimSpace(repo)
+	if !strings.HasPrefix(trimmed, "__copilot__") {
+		return "", false
+	}
+	parts := strings.Split(trimmed, "__")
+	if len(parts) != 4 {
+		return "", false
+	}
+	scope := strings.TrimSpace(parts[2])
+	if scope == "" {
+		return "", false
+	}
+	return scope, true
 }

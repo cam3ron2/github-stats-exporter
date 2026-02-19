@@ -2,8 +2,12 @@ package scrape
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +18,8 @@ import (
 )
 
 const (
+	dayFormat = "2006-01-02"
+
 	repoMissReasonContributorStats = "contributor_stats_failed"
 	repoMissReasonFallbackList     = "fallback_list_commits_failed"
 	repoMissReasonFallbackDetail   = "fallback_commit_detail_failed"
@@ -21,12 +27,21 @@ const (
 	repoMissReasonActivityPulls    = "activity_pulls_failed"
 	repoMissReasonActivityReviews  = "activity_reviews_failed"
 	repoMissReasonActivityComments = "activity_issue_comments_failed"
+	repoMissReasonCopilotFetch     = "copilot_report_fetch_error"
+	repoMissReasonCopilotDownload  = "copilot_report_download_error"
+	repoMissReasonCopilotParse     = "copilot_report_parse_error"
 	userLabelUnlinkedGitAuthor     = "unlinked_git_author"
 	userLabelUnattributedCommit    = "unattributed_commit"
 	locModeStatsContributors       = "stats_contributors"
 	locModeSampledCommitStats      = "sampled_commit_stats"
 	internalMetricLOCSourceMode    = "gh_exporter_loc_source_mode"
 	internalMetricLOCFallbackIncom = "gh_exporter_loc_fallback_incomplete"
+	copilotScopeOrg                = "org"
+	copilotScopeUsers              = "users"
+	copilotScopeEnterprise         = "enterprise"
+	copilotScopeEnterpriseUsers    = "enterprise_users"
+	copilotWindow1d                = "1d"
+	copilotWindow28d               = "28d"
 )
 
 // GitHubDataClient is the typed GitHub API interface consumed by the org scraper.
@@ -38,6 +53,33 @@ type GitHubDataClient interface {
 	ListPullReviews(ctx context.Context, owner, repo string, pullNumber int, since, until time.Time) (githubapi.PullReviewsResult, error)
 	ListIssueCommentsWindow(ctx context.Context, owner, repo string, since, until time.Time) (githubapi.IssueCommentsResult, error)
 	GetCommit(ctx context.Context, owner, repo, sha string) (githubapi.CommitDetail, error)
+	GetOrgCopilotOrganization1DayReportLink(ctx context.Context, org string, day time.Time) (githubapi.CopilotReportLinkResult, error)
+	GetOrgCopilotOrganization28DayLatestReportLink(ctx context.Context, org string) (githubapi.CopilotReportLinkResult, error)
+	GetOrgCopilotUsers1DayReportLink(ctx context.Context, org string, day time.Time) (githubapi.CopilotReportLinkResult, error)
+	GetOrgCopilotUsers28DayLatestReportLink(ctx context.Context, org string) (githubapi.CopilotReportLinkResult, error)
+	GetEnterpriseCopilotEnterprise1DayReportLink(
+		ctx context.Context,
+		enterprise string,
+		day time.Time,
+	) (githubapi.CopilotReportLinkResult, error)
+	GetEnterpriseCopilotEnterprise28DayLatestReportLink(
+		ctx context.Context,
+		enterprise string,
+	) (githubapi.CopilotReportLinkResult, error)
+	GetEnterpriseCopilotUsers1DayReportLink(
+		ctx context.Context,
+		enterprise string,
+		day time.Time,
+	) (githubapi.CopilotReportLinkResult, error)
+	GetEnterpriseCopilotUsers28DayLatestReportLink(
+		ctx context.Context,
+		enterprise string,
+	) (githubapi.CopilotReportLinkResult, error)
+	StreamCopilotReportNDJSON(
+		ctx context.Context,
+		signedReportURL string,
+		handler func(record map[string]any) error,
+	) (githubapi.CopilotReportStreamResult, error)
 }
 
 // GitHubOrgScraperConfig configures GitHub-backed org scraping behavior.
@@ -48,6 +90,9 @@ type GitHubOrgScraperConfig struct {
 	FallbackMaxCommitDetailCallsPerOrgPerHour int
 	LargeRepoZeroDetectionWindows             int
 	LargeRepoCooldown                         time.Duration
+	Copilot                                   config.CopilotConfig
+	CopilotEnterpriseClient                   GitHubDataClient
+	CopilotEnterprisePrimaryOrg               string
 	Checkpoints                               CheckpointStore
 	Now                                       func() time.Time
 	Sleep                                     func(time.Duration)
@@ -60,6 +105,9 @@ type GitHubOrgScraper struct {
 
 	stateMachine githubapi.LOCStateMachine
 	checkpoints  CheckpointStore
+	copilotCfg   config.CopilotConfig
+	enterprise   GitHubDataClient
+	primaryOrg   string
 
 	mu                    sync.Mutex
 	locStateByRepo        map[string]githubapi.LOCState
@@ -129,6 +177,9 @@ func NewGitHubOrgScraper(clients map[string]GitHubDataClient, cfg GitHubOrgScrap
 			FallbackCooldown:      cfg.LargeRepoCooldown,
 		},
 		checkpoints:           cfg.Checkpoints,
+		copilotCfg:            cfg.Copilot,
+		enterprise:            cfg.CopilotEnterpriseClient,
+		primaryOrg:            strings.TrimSpace(cfg.CopilotEnterprisePrimaryOrg),
 		locStateByRepo:        make(map[string]githubapi.LOCState),
 		fallbackOrgBudgetByHr: make(map[string]orgFallbackBudget),
 	}
@@ -181,7 +232,12 @@ func (s *GitHubOrgScraper) ScrapeOrg(ctx context.Context, org config.GitHubOrgCo
 	repos := filterRepositories(reposResult.Repos, org.RepoAllowlist)
 	result.Summary.ReposTargeted = len(repos)
 	if len(repos) == 0 {
+		copilotOutcome := s.scrapeCopilotForOrg(ctx, orgName, client, &rateSummary)
+		result.Metrics = append(result.Metrics, copilotOutcome.metrics...)
+		result.MissedWindow = append(result.MissedWindow, copilotOutcome.missed...)
 		minRemaining, resetUnix, secondaryHits, requestTotals := rateSummary.snapshot()
+		result.Summary.MissedWindows = len(result.MissedWindow)
+		result.Summary.MetricsProduced = len(result.Metrics)
 		result.Summary.RateLimitMinRemaining = minRemaining
 		result.Summary.RateLimitResetUnix = resetUnix
 		result.Summary.SecondaryLimitHits = secondaryHits
@@ -230,6 +286,11 @@ func (s *GitHubOrgScraper) ScrapeOrg(ctx context.Context, org config.GitHubOrgCo
 		result.Summary.ReposFallbackTruncated += outcome.summaryDelta.fallbackTruncated
 		result.Summary.LOCFallbackBudgetHits += outcome.summaryDelta.fallbackBudgetHits
 	}
+
+	copilotOutcome := s.scrapeCopilotForOrg(ctx, orgName, client, &rateSummary)
+	result.Metrics = append(result.Metrics, copilotOutcome.metrics...)
+	result.MissedWindow = append(result.MissedWindow, copilotOutcome.missed...)
+
 	result.Summary.MissedWindows = len(result.MissedWindow)
 	result.Summary.MetricsProduced = len(result.Metrics)
 	minRemaining, resetUnix, secondaryHits, requestTotals := rateSummary.snapshot()
@@ -794,6 +855,32 @@ func (s *GitHubOrgScraper) ScrapeBackfill(
 	}
 	result := OrgResult{}
 	repoName := strings.TrimSpace(repo)
+	if strings.HasPrefix(repoName, "__copilot__") || strings.HasPrefix(strings.TrimSpace(reason), "copilot_report_") {
+		copilotRepoKey := repoName
+		if copilotRepoKey == "" || copilotRepoKey == "*" {
+			copilotRepoKey = copilotCheckpointRepoKey("org", "28d")
+		}
+		copilotOutcome := s.scrapeCopilotBackfill(
+			ctx,
+			orgName,
+			client,
+			copilotRepoKey,
+			windowStart,
+			windowEnd,
+			&rateSummary,
+		)
+		result.Metrics = append(result.Metrics, copilotOutcome.metrics...)
+		result.MissedWindow = append(result.MissedWindow, copilotOutcome.missed...)
+		result.Summary.MissedWindows = len(result.MissedWindow)
+		result.Summary.MetricsProduced = len(result.Metrics)
+		minRemaining, resetUnix, secondaryHits, requestTotals := rateSummary.snapshot()
+		result.Summary.RateLimitMinRemaining = minRemaining
+		result.Summary.RateLimitResetUnix = resetUnix
+		result.Summary.SecondaryLimitHits = secondaryHits
+		result.Summary.GitHubRequestTotals = requestTotals
+		return result, nil
+	}
+
 	repoNames := make([]string, 0, 1)
 
 	if repoName == "" || repoName == "*" {
@@ -888,6 +975,808 @@ func (s *GitHubOrgScraper) scrapeRepositoryBackfill(
 		}
 		return merged
 	}
+}
+
+func (s *GitHubOrgScraper) scrapeCopilotForOrg(
+	ctx context.Context,
+	org string,
+	orgClient GitHubDataClient,
+	rateSummary *orgRateLimitSummary,
+) repositoryOutcome {
+	if !s.copilotCfg.Enabled {
+		return repositoryOutcome{}
+	}
+
+	now := s.cfg.Now().UTC()
+	outcome := repositoryOutcome{}
+	if s.copilotCfg.IncludeOrg28d {
+		specOutcome := s.scrapeCopilotReport(
+			ctx,
+			orgClient,
+			org,
+			copilotScopeOrg,
+			copilotWindow28d,
+			copilotCheckpointRepoKey(copilotScopeOrg, copilotWindow28d),
+			func(callCtx context.Context) (githubapi.CopilotReportLinkResult, error) {
+				return orgClient.GetOrgCopilotOrganization28DayLatestReportLink(callCtx, org)
+			},
+			now,
+			rateSummary,
+			true,
+		)
+		outcome = mergeRepositoryOutcome(outcome, specOutcome)
+	}
+	if s.copilotCfg.IncludeOrgUsers28d {
+		specOutcome := s.scrapeCopilotReport(
+			ctx,
+			orgClient,
+			org,
+			copilotScopeUsers,
+			copilotWindow28d,
+			copilotCheckpointRepoKey(copilotScopeUsers, copilotWindow28d),
+			func(callCtx context.Context) (githubapi.CopilotReportLinkResult, error) {
+				return orgClient.GetOrgCopilotUsers28DayLatestReportLink(callCtx, org)
+			},
+			now,
+			rateSummary,
+			true,
+		)
+		outcome = mergeRepositoryOutcome(outcome, specOutcome)
+	}
+
+	if !s.shouldScrapeEnterpriseForOrg(org) {
+		outcome.missed = dedupeMissedWindows(outcome.missed)
+		return outcome
+	}
+
+	enterpriseClient := s.enterprise
+	if enterpriseClient == nil {
+		outcome.missed = append(outcome.missed, MissedWindow{
+			Org:         strings.TrimSpace(s.copilotCfg.Enterprise.Slug),
+			Repo:        copilotCheckpointRepoKey(copilotScopeEnterprise, copilotWindow28d),
+			WindowStart: now,
+			WindowEnd:   now,
+			Reason:      repoMissReasonCopilotFetch,
+		})
+		outcome.missed = dedupeMissedWindows(outcome.missed)
+		return outcome
+	}
+
+	enterpriseSlug := strings.TrimSpace(s.copilotCfg.Enterprise.Slug)
+	if s.copilotCfg.IncludeEnterprise28d {
+		specOutcome := s.scrapeCopilotReport(
+			ctx,
+			enterpriseClient,
+			enterpriseSlug,
+			copilotScopeEnterprise,
+			copilotWindow28d,
+			copilotCheckpointRepoKey(copilotScopeEnterprise, copilotWindow28d),
+			func(callCtx context.Context) (githubapi.CopilotReportLinkResult, error) {
+				return enterpriseClient.GetEnterpriseCopilotEnterprise28DayLatestReportLink(callCtx, enterpriseSlug)
+			},
+			now,
+			rateSummary,
+			true,
+		)
+		outcome = mergeRepositoryOutcome(outcome, specOutcome)
+	}
+	if s.copilotCfg.IncludeEnterpriseUsers28d {
+		specOutcome := s.scrapeCopilotReport(
+			ctx,
+			enterpriseClient,
+			enterpriseSlug,
+			copilotScopeUsers,
+			copilotWindow28d,
+			copilotCheckpointRepoKey(copilotScopeEnterpriseUsers, copilotWindow28d),
+			func(callCtx context.Context) (githubapi.CopilotReportLinkResult, error) {
+				return enterpriseClient.GetEnterpriseCopilotUsers28DayLatestReportLink(callCtx, enterpriseSlug)
+			},
+			now,
+			rateSummary,
+			true,
+		)
+		outcome = mergeRepositoryOutcome(outcome, specOutcome)
+	}
+
+	outcome.missed = dedupeMissedWindows(outcome.missed)
+	return outcome
+}
+
+func (s *GitHubOrgScraper) scrapeCopilotBackfill(
+	ctx context.Context,
+	org string,
+	orgClient GitHubDataClient,
+	repoKey string,
+	windowStart time.Time,
+	windowEnd time.Time,
+	rateSummary *orgRateLimitSummary,
+) repositoryOutcome {
+	if !s.copilotCfg.Enabled {
+		return repositoryOutcome{}
+	}
+	scopeKey, _, ok := parseCopilotCheckpointRepoKey(repoKey)
+	if !ok {
+		return repositoryOutcome{}
+	}
+
+	now := s.cfg.Now().UTC()
+	day := windowEnd
+	if day.IsZero() {
+		day = windowStart
+	}
+	if day.IsZero() {
+		day = now
+	}
+	day = time.Date(day.UTC().Year(), day.UTC().Month(), day.UTC().Day(), 0, 0, 0, 0, time.UTC)
+
+	switch scopeKey {
+	case copilotScopeOrg:
+		return s.scrapeCopilotReport(
+			ctx,
+			orgClient,
+			org,
+			copilotScopeOrg,
+			copilotWindow1d,
+			repoKey,
+			func(callCtx context.Context) (githubapi.CopilotReportLinkResult, error) {
+				return orgClient.GetOrgCopilotOrganization1DayReportLink(callCtx, org, day)
+			},
+			now,
+			rateSummary,
+			false,
+		)
+	case copilotScopeUsers:
+		return s.scrapeCopilotReport(
+			ctx,
+			orgClient,
+			org,
+			copilotScopeUsers,
+			copilotWindow1d,
+			repoKey,
+			func(callCtx context.Context) (githubapi.CopilotReportLinkResult, error) {
+				return orgClient.GetOrgCopilotUsers1DayReportLink(callCtx, org, day)
+			},
+			now,
+			rateSummary,
+			false,
+		)
+	case copilotScopeEnterprise:
+		if s.enterprise == nil {
+			return repositoryOutcome{
+				missed: []MissedWindow{{
+					Org:         strings.TrimSpace(s.copilotCfg.Enterprise.Slug),
+					Repo:        repoKey,
+					WindowStart: day,
+					WindowEnd:   day,
+					Reason:      repoMissReasonCopilotFetch,
+				}},
+			}
+		}
+		enterpriseSlug := strings.TrimSpace(s.copilotCfg.Enterprise.Slug)
+		return s.scrapeCopilotReport(
+			ctx,
+			s.enterprise,
+			enterpriseSlug,
+			copilotScopeEnterprise,
+			copilotWindow1d,
+			repoKey,
+			func(callCtx context.Context) (githubapi.CopilotReportLinkResult, error) {
+				return s.enterprise.GetEnterpriseCopilotEnterprise1DayReportLink(callCtx, enterpriseSlug, day)
+			},
+			now,
+			rateSummary,
+			false,
+		)
+	case copilotScopeEnterpriseUsers:
+		if s.enterprise == nil {
+			return repositoryOutcome{
+				missed: []MissedWindow{{
+					Org:         strings.TrimSpace(s.copilotCfg.Enterprise.Slug),
+					Repo:        repoKey,
+					WindowStart: day,
+					WindowEnd:   day,
+					Reason:      repoMissReasonCopilotFetch,
+				}},
+			}
+		}
+		enterpriseSlug := strings.TrimSpace(s.copilotCfg.Enterprise.Slug)
+		return s.scrapeCopilotReport(
+			ctx,
+			s.enterprise,
+			enterpriseSlug,
+			copilotScopeUsers,
+			copilotWindow1d,
+			repoKey,
+			func(callCtx context.Context) (githubapi.CopilotReportLinkResult, error) {
+				return s.enterprise.GetEnterpriseCopilotUsers1DayReportLink(callCtx, enterpriseSlug, day)
+			},
+			now,
+			rateSummary,
+			false,
+		)
+	default:
+		return repositoryOutcome{}
+	}
+}
+
+func (s *GitHubOrgScraper) scrapeCopilotReport(
+	ctx context.Context,
+	client GitHubDataClient,
+	orgLabel string,
+	scope string,
+	window string,
+	repoKey string,
+	fetchLink func(context.Context) (githubapi.CopilotReportLinkResult, error),
+	now time.Time,
+	rateSummary *orgRateLimitSummary,
+	respectInterval bool,
+) repositoryOutcome {
+	internalMetrics := make([]store.MetricPoint, 0, 12)
+	appendInternal := func(name string, value float64, labels map[string]string) {
+		internalMetrics = append(internalMetrics, store.MetricPoint{
+			Name:      name,
+			Labels:    labels,
+			Value:     value,
+			UpdatedAt: now,
+		})
+	}
+
+	if respectInterval && s.copilotCfg.ScrapeInterval > 0 {
+		lastRunKey := copilotLastRunRepoKey(scope, window)
+		if lastRunAt, found := s.readCheckpoint(orgLabel, lastRunKey); found {
+			nextAllowed := lastRunAt.Add(s.copilotCfg.ScrapeInterval)
+			if now.Before(nextAllowed) {
+				appendInternal("gh_exporter_copilot_scrape_runs_total", 1, map[string]string{
+					"scope":  scope,
+					"result": "skipped_interval",
+				})
+				return repositoryOutcome{metrics: internalMetrics}
+			}
+		}
+	}
+	if respectInterval {
+		s.advanceCheckpoint(orgLabel, copilotLastRunRepoKey(scope, window), now)
+	}
+
+	linkCtx := ctx
+	if s.copilotCfg.RequestTimeout > 0 {
+		var cancel context.CancelFunc
+		linkCtx, cancel = context.WithTimeout(ctx, s.copilotCfg.RequestTimeout)
+		defer cancel()
+	}
+
+	linkResult, err := fetchLink(linkCtx)
+	if err != nil {
+		if rateSummary != nil {
+			rateSummary.observeRequest("copilot_report_link", "error")
+		}
+		appendInternal("gh_exporter_copilot_scrape_runs_total", 1, map[string]string{
+			"scope":  scope,
+			"result": "fetch_error",
+		})
+		return repositoryOutcome{
+			metrics: internalMetrics,
+			missed: []MissedWindow{{
+				Org:         orgLabel,
+				Repo:        repoKey,
+				WindowStart: now,
+				WindowEnd:   now,
+				Reason:      repoMissReasonCopilotFetch,
+			}},
+		}
+	}
+
+	if rateSummary != nil {
+		rateSummary.observeRequest("copilot_report_link", endpointStatusClass(linkResult.Status))
+		s.applyRateLimitPacing(linkResult.Metadata, rateSummary)
+	}
+	if linkResult.Status != githubapi.EndpointStatusOK {
+		appendInternal("gh_exporter_copilot_scrape_runs_total", 1, map[string]string{
+			"scope":  scope,
+			"result": "fetch_status_error",
+		})
+		return repositoryOutcome{
+			metrics: internalMetrics,
+			missed: []MissedWindow{{
+				Org:         orgLabel,
+				Repo:        repoKey,
+				WindowStart: now,
+				WindowEnd:   now,
+				Reason:      repoMissReasonCopilotFetch,
+			}},
+		}
+	}
+
+	if !s.copilotCfg.RefreshIfReportUnchanged && !linkResult.ReportEndDay.IsZero() {
+		if checkpoint, found := s.readCheckpoint(orgLabel, repoKey); found {
+			if !linkResult.ReportEndDay.After(checkpoint) {
+				appendInternal("gh_exporter_copilot_scrape_runs_total", 1, map[string]string{
+					"scope":  scope,
+					"result": "skipped_unchanged",
+				})
+				return repositoryOutcome{metrics: internalMetrics}
+			}
+		}
+	}
+
+	reportURL := strings.TrimSpace(linkResult.URL)
+	if reportURL == "" && len(linkResult.DownloadLinks) > 0 {
+		reportURL = strings.TrimSpace(linkResult.DownloadLinks[0])
+	}
+	if reportURL == "" {
+		appendInternal("gh_exporter_copilot_scrape_runs_total", 1, map[string]string{
+			"scope":  scope,
+			"result": "fetch_error",
+		})
+		return repositoryOutcome{
+			metrics: internalMetrics,
+			missed: []MissedWindow{{
+				Org:         orgLabel,
+				Repo:        repoKey,
+				WindowStart: now,
+				WindowEnd:   now,
+				Reason:      repoMissReasonCopilotFetch,
+			}},
+		}
+	}
+
+	metrics := make([]store.MetricPoint, 0, 32)
+	recordsSeen := 0
+	seenUsers := make(map[string]struct{})
+	droppedByRecordLimit := 0
+	droppedByUserLimit := 0
+	downloadCtx := ctx
+	if s.copilotCfg.DownloadTimeout > 0 {
+		var cancel context.CancelFunc
+		downloadCtx, cancel = context.WithTimeout(ctx, s.copilotCfg.DownloadTimeout)
+		defer cancel()
+	}
+	streamResult, err := client.StreamCopilotReportNDJSON(
+		downloadCtx,
+		reportURL,
+		func(record map[string]any) error {
+			recordsSeen++
+			if s.copilotCfg.MaxRecordsPerReport > 0 && recordsSeen > s.copilotCfg.MaxRecordsPerReport {
+				droppedByRecordLimit++
+				return nil
+			}
+
+			userLabel := s.resolveCopilotUserLabel(record, scope)
+			if scope == copilotScopeUsers && s.copilotCfg.MaxUsersPerReport > 0 {
+				if _, exists := seenUsers[userLabel]; !exists {
+					if len(seenUsers) >= s.copilotCfg.MaxUsersPerReport {
+						droppedByUserLimit++
+						return nil
+					}
+					seenUsers[userLabel] = struct{}{}
+				}
+			}
+
+			recordMetrics := s.buildCopilotMetricsForRecord(
+				record,
+				orgLabel,
+				scope,
+				window,
+				userLabel,
+				linkResult,
+				now,
+			)
+			metrics = append(metrics, recordMetrics...)
+			return nil
+		},
+	)
+	if err != nil {
+		if rateSummary != nil {
+			rateSummary.observeRequest("copilot_report_download", "error")
+		}
+		appendInternal("gh_exporter_copilot_scrape_runs_total", 1, map[string]string{
+			"scope":  scope,
+			"result": "download_error",
+		})
+		appendInternal("gh_exporter_copilot_report_download_total", 1, map[string]string{
+			"scope":  scope,
+			"result": "failure",
+		})
+		return repositoryOutcome{
+			metrics: internalMetrics,
+			missed: []MissedWindow{{
+				Org:         orgLabel,
+				Repo:        repoKey,
+				WindowStart: now,
+				WindowEnd:   now,
+				Reason:      repoMissReasonCopilotDownload,
+			}},
+		}
+	}
+	if rateSummary != nil {
+		rateSummary.observeRequest("copilot_report_download", endpointStatusClass(streamResult.Status))
+		s.applyRateLimitPacing(streamResult.Metadata, rateSummary)
+	}
+	if streamResult.Status != githubapi.EndpointStatusOK {
+		appendInternal("gh_exporter_copilot_scrape_runs_total", 1, map[string]string{
+			"scope":  scope,
+			"result": "download_status_error",
+		})
+		appendInternal("gh_exporter_copilot_report_download_total", 1, map[string]string{
+			"scope":  scope,
+			"result": "failure",
+		})
+		return repositoryOutcome{
+			metrics: internalMetrics,
+			missed: []MissedWindow{{
+				Org:         orgLabel,
+				Repo:        repoKey,
+				WindowStart: now,
+				WindowEnd:   now,
+				Reason:      repoMissReasonCopilotDownload,
+			}},
+		}
+	}
+
+	outcome := repositoryOutcome{
+		metrics: metrics,
+	}
+	appendInternal("gh_exporter_copilot_report_download_total", 1, map[string]string{
+		"scope":  scope,
+		"result": "success",
+	})
+	appendInternal("gh_exporter_copilot_records_parsed_total", float64(streamResult.RecordsParsed), map[string]string{
+		"scope": scope,
+	})
+	if droppedByRecordLimit > 0 {
+		appendInternal("gh_exporter_copilot_records_dropped_total", float64(droppedByRecordLimit), map[string]string{
+			"scope":  scope,
+			"reason": "max_records_per_report",
+		})
+	}
+	if droppedByUserLimit > 0 {
+		appendInternal("gh_exporter_copilot_records_dropped_total", float64(droppedByUserLimit), map[string]string{
+			"scope":  scope,
+			"reason": "max_users_per_report",
+		})
+	}
+	appendInternal("gh_exporter_copilot_last_success_unixtime", float64(now.Unix()), map[string]string{
+		"scope": scope,
+	})
+	if !linkResult.ReportEndDay.IsZero() {
+		appendInternal("gh_exporter_copilot_report_staleness_seconds", now.Sub(linkResult.ReportEndDay).Seconds(), map[string]string{
+			"scope": scope,
+		})
+	}
+	if streamResult.ParseErrors > 0 && streamResult.RecordsParsed == 0 {
+		appendInternal("gh_exporter_copilot_scrape_runs_total", 1, map[string]string{
+			"scope":  scope,
+			"result": "parse_error",
+		})
+		outcome.missed = append(outcome.missed, MissedWindow{
+			Org:         orgLabel,
+			Repo:        repoKey,
+			WindowStart: now,
+			WindowEnd:   now,
+			Reason:      repoMissReasonCopilotParse,
+		})
+	} else {
+		appendInternal("gh_exporter_copilot_scrape_runs_total", 1, map[string]string{
+			"scope":  scope,
+			"result": "success",
+		})
+	}
+	if !linkResult.ReportEndDay.IsZero() {
+		s.advanceCheckpoint(orgLabel, repoKey, linkResult.ReportEndDay)
+	}
+	outcome.metrics = append(outcome.metrics, internalMetrics...)
+	return outcome
+}
+
+func (s *GitHubOrgScraper) shouldScrapeEnterpriseForOrg(org string) bool {
+	if !s.copilotCfg.Enabled || !s.copilotCfg.Enterprise.Enabled {
+		return false
+	}
+	if !s.copilotCfg.IncludeEnterprise28d && !s.copilotCfg.IncludeEnterpriseUsers28d {
+		return false
+	}
+	primary := strings.TrimSpace(s.primaryOrg)
+	if primary == "" {
+		return false
+	}
+	return strings.TrimSpace(org) == primary
+}
+
+func (s *GitHubOrgScraper) resolveCopilotUserLabel(record map[string]any, scope string) string {
+	if scope != copilotScopeUsers {
+		return "all"
+	}
+
+	mode := strings.TrimSpace(s.copilotCfg.UserLabelMode)
+	if mode == "" {
+		mode = "login"
+	}
+	login := firstString(record, "user_login", "user", "login", "username")
+	userID := firstString(record, "user_id", "id")
+	switch mode {
+	case "id":
+		if strings.TrimSpace(userID) != "" {
+			return normalizeActor(userID)
+		}
+		if strings.TrimSpace(login) != "" {
+			return normalizeActor(login)
+		}
+	case "hashed":
+		seed := strings.TrimSpace(login)
+		if seed == "" {
+			seed = strings.TrimSpace(userID)
+		}
+		if seed == "" {
+			return UnknownLabelValue
+		}
+		sum := sha256.Sum256([]byte(seed))
+		return hex.EncodeToString(sum[:])
+	case "none":
+		return "redacted"
+	default:
+		if strings.TrimSpace(login) != "" {
+			return normalizeActor(login)
+		}
+		if strings.TrimSpace(userID) != "" {
+			return normalizeActor(userID)
+		}
+	}
+	return UnknownLabelValue
+}
+
+func (s *GitHubOrgScraper) buildCopilotMetricsForRecord(
+	record map[string]any,
+	org string,
+	scope string,
+	window string,
+	user string,
+	linkResult githubapi.CopilotReportLinkResult,
+	observedAt time.Time,
+) []store.MetricPoint {
+	labels := map[string]string{
+		LabelScope:  scope,
+		LabelWindow: window,
+	}
+	if dayLabel := s.copilotDayLabel(record, linkResult); dayLabel != "" {
+		labels[LabelDay] = dayLabel
+	}
+	if s.copilotCfg.IncludeBreakdownFeature {
+		if feature := firstString(record, LabelFeature); feature != "" {
+			labels[LabelFeature] = feature
+		}
+	}
+	if s.copilotCfg.IncludeBreakdownIDE {
+		if ide := firstString(record, LabelIDE, "editor_name"); ide != "" {
+			labels[LabelIDE] = ide
+		}
+	}
+	if s.copilotCfg.IncludeBreakdownLanguage {
+		if language := firstString(record, LabelLanguage); language != "" {
+			labels[LabelLanguage] = language
+		}
+	}
+	if s.copilotCfg.IncludeBreakdownModel {
+		if model := firstString(record, LabelModel); model != "" {
+			labels[LabelModel] = model
+		}
+	}
+	if chatMode := firstString(record, LabelChatMode); chatMode != "" {
+		labels[LabelChatMode] = chatMode
+	}
+
+	type metricSpec struct {
+		name   string
+		value  float64
+		exists bool
+	}
+	metricSpecs := []metricSpec{
+		{
+			name:   MetricCopilotUserInitiatedInteractions,
+			value:  sumNumbers(record, "user_initiated_interaction_count", "total_chats", "total_chat_copy_events", "total_chat_insertion_events"),
+			exists: hasAnyNumber(record, "user_initiated_interaction_count", "total_chats", "total_chat_copy_events", "total_chat_insertion_events"),
+		},
+		{
+			name:   MetricCopilotCodeGenerationActivity,
+			value:  firstNumberOrZero(record, "code_generation_activity_count", "total_code_suggestions"),
+			exists: hasAnyNumber(record, "code_generation_activity_count", "total_code_suggestions"),
+		},
+		{
+			name:   MetricCopilotCodeAcceptanceActivity,
+			value:  firstNumberOrZero(record, "code_acceptance_activity_count", "total_code_acceptances"),
+			exists: hasAnyNumber(record, "code_acceptance_activity_count", "total_code_acceptances"),
+		},
+		{
+			name:   MetricCopilotLOCSuggestedToAdd,
+			value:  firstNumberOrZero(record, "loc_suggested_to_add_sum", "total_code_lines_suggested", "total_code_lines_suggested_to_add"),
+			exists: hasAnyNumber(record, "loc_suggested_to_add_sum", "total_code_lines_suggested", "total_code_lines_suggested_to_add"),
+		},
+		{
+			name:   MetricCopilotLOCSuggestedToDelete,
+			value:  firstNumberOrZero(record, "loc_suggested_to_delete_sum", "total_code_lines_suggested_to_delete"),
+			exists: hasAnyNumber(record, "loc_suggested_to_delete_sum", "total_code_lines_suggested_to_delete"),
+		},
+		{
+			name:   MetricCopilotLOCAdded,
+			value:  firstNumberOrZero(record, "loc_added_sum", "total_code_lines_accepted", "total_code_lines_added"),
+			exists: hasAnyNumber(record, "loc_added_sum", "total_code_lines_accepted", "total_code_lines_added"),
+		},
+		{
+			name:   MetricCopilotLOCDeleted,
+			value:  firstNumberOrZero(record, "loc_deleted_sum", "total_code_lines_deleted", "total_code_lines_removed"),
+			exists: hasAnyNumber(record, "loc_deleted_sum", "total_code_lines_deleted", "total_code_lines_removed"),
+		},
+	}
+	if s.copilotCfg.IncludePullRequestActivity {
+		metricSpecs = append(metricSpecs,
+			metricSpec{
+				name:   MetricCopilotPRTotalCreated,
+				value:  firstNumberOrZero(record, "pull_requests_total_created", "total_pull_requests_created"),
+				exists: hasAnyNumber(record, "pull_requests_total_created", "total_pull_requests_created"),
+			},
+			metricSpec{
+				name:   MetricCopilotPRTotalReviewed,
+				value:  firstNumberOrZero(record, "pull_requests_total_reviewed", "total_pull_requests_reviewed"),
+				exists: hasAnyNumber(record, "pull_requests_total_reviewed", "total_pull_requests_reviewed"),
+			},
+			metricSpec{
+				name: MetricCopilotPRTotalCreatedByCopilot,
+				value: firstNumberOrZero(
+					record,
+					"pull_requests_total_created_by_copilot",
+					"total_pull_requests_created_by_copilot",
+					"total_pr_summaries_created",
+				),
+				exists: hasAnyNumber(
+					record,
+					"pull_requests_total_created_by_copilot",
+					"total_pull_requests_created_by_copilot",
+					"total_pr_summaries_created",
+				),
+			},
+			metricSpec{
+				name: MetricCopilotPRTotalReviewedByCopilot,
+				value: firstNumberOrZero(
+					record,
+					"pull_requests_total_reviewed_by_copilot",
+					"total_pull_requests_reviewed_by_copilot",
+					"total_pr_summaries_created_users",
+				),
+				exists: hasAnyNumber(
+					record,
+					"pull_requests_total_reviewed_by_copilot",
+					"total_pull_requests_reviewed_by_copilot",
+					"total_pr_summaries_created_users",
+				),
+			},
+		)
+	}
+
+	metrics := make([]store.MetricPoint, 0, len(metricSpecs))
+	for _, spec := range metricSpecs {
+		if !spec.exists {
+			continue
+		}
+		point, err := NewCopilotMetric(spec.name, org, user, spec.value, observedAt, labels)
+		if err != nil {
+			continue
+		}
+		metrics = append(metrics, point)
+	}
+	return metrics
+}
+
+func (s *GitHubOrgScraper) copilotDayLabel(
+	record map[string]any,
+	linkResult githubapi.CopilotReportLinkResult,
+) string {
+	if !s.copilotCfg.EmitDayLabel {
+		return ""
+	}
+	if day := firstString(record, "day", "report_day"); day != "" {
+		return day
+	}
+	if !linkResult.ReportDay.IsZero() {
+		return linkResult.ReportDay.UTC().Format(dayFormat)
+	}
+	if !linkResult.ReportEndDay.IsZero() {
+		return linkResult.ReportEndDay.UTC().Format(dayFormat)
+	}
+	return ""
+}
+
+func copilotCheckpointRepoKey(scope, window string) string {
+	return "__copilot__" + strings.TrimSpace(scope) + "__" + strings.TrimSpace(window)
+}
+
+func copilotLastRunRepoKey(scope, window string) string {
+	return "__copilot_run__" + strings.TrimSpace(scope) + "__" + strings.TrimSpace(window)
+}
+
+func parseCopilotCheckpointRepoKey(repo string) (scope, window string, ok bool) {
+	trimmed := strings.TrimSpace(repo)
+	if !strings.HasPrefix(trimmed, "__copilot__") {
+		return "", "", false
+	}
+	parts := strings.Split(trimmed, "__")
+	if len(parts) != 4 {
+		return "", "", false
+	}
+	if strings.TrimSpace(parts[2]) == "" || strings.TrimSpace(parts[3]) == "" {
+		return "", "", false
+	}
+	return parts[2], parts[3], true
+}
+
+func firstString(record map[string]any, keys ...string) string {
+	for _, key := range keys {
+		raw, ok := record[key]
+		if !ok {
+			continue
+		}
+		switch value := raw.(type) {
+		case string:
+			if strings.TrimSpace(value) != "" {
+				return strings.TrimSpace(value)
+			}
+		case float64:
+			return strconv.FormatInt(int64(value), 10)
+		case int:
+			return strconv.Itoa(value)
+		case int64:
+			return strconv.FormatInt(value, 10)
+		}
+	}
+	return ""
+}
+
+func firstNumberOrZero(record map[string]any, keys ...string) float64 {
+	value, _ := firstNumber(record, keys...)
+	return value
+}
+
+func hasAnyNumber(record map[string]any, keys ...string) bool {
+	_, ok := firstNumber(record, keys...)
+	return ok
+}
+
+func sumNumbers(record map[string]any, keys ...string) float64 {
+	total := 0.0
+	for _, key := range keys {
+		if value, ok := firstNumber(record, key); ok {
+			total += value
+		}
+	}
+	return total
+}
+
+func firstNumber(record map[string]any, keys ...string) (float64, bool) {
+	for _, key := range keys {
+		raw, ok := record[key]
+		if !ok {
+			continue
+		}
+		switch value := raw.(type) {
+		case float64:
+			return value, true
+		case float32:
+			return float64(value), true
+		case int:
+			return float64(value), true
+		case int64:
+			return float64(value), true
+		case json.Number:
+			parsed, err := value.Float64()
+			if err == nil {
+				return parsed, true
+			}
+		case string:
+			parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+			if err == nil {
+				return parsed, true
+			}
+		}
+	}
+	return 0, false
 }
 
 func (s *GitHubOrgScraper) recordLOCState(org, repo string, event githubapi.LOCEvent) githubapi.LOCState {

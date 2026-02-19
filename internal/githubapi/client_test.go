@@ -14,11 +14,15 @@ type fakeDoer struct {
 	responses []*http.Response
 	errors    []error
 	callCount int
+	requests  []*http.Request
 }
 
-func (d *fakeDoer) Do(_ *http.Request) (*http.Response, error) {
+func (d *fakeDoer) Do(req *http.Request) (*http.Response, error) {
 	idx := d.callCount
 	d.callCount++
+	if req != nil {
+		d.requests = append(d.requests, req.Clone(req.Context()))
+	}
 
 	var resp *http.Response
 	if idx < len(d.responses) {

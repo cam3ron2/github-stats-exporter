@@ -94,6 +94,199 @@ func TestRuntimeEndpointsWithRealGitHubScraperConverge(t *testing.T) {
 	}
 }
 
+func TestRuntimeEndpointsWithCopilotMetricsConverge(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	fixture := seedFixtureWithTwoOrganizations(t, now)
+	orgs := []config.GitHubOrgConfig{
+		{
+			Org:               "cam3ron2",
+			AppID:             1,
+			InstallationID:    1001,
+			ScrapeInterval:    200 * time.Millisecond,
+			PerOrgConcurrency: 2,
+		},
+		{
+			Org:               "shigops",
+			AppID:             2,
+			InstallationID:    2002,
+			ScrapeInterval:    200 * time.Millisecond,
+			PerOrgConcurrency: 2,
+		},
+	}
+
+	harness := newRealScraperDualRuntimeHarness(t, fixture, orgs, func(cfg *config.Config) {
+		cfg.Copilot.Enabled = true
+		cfg.Copilot.IncludeOrg28d = true
+		cfg.Copilot.IncludeOrgUsers28d = true
+		cfg.Copilot.ScrapeInterval = 200 * time.Millisecond
+		cfg.Copilot.RefreshIfReportUnchanged = true
+	})
+	waitForLeaderFollowerReady(t, harness.httpClient, harness.leaderURL, harness.followerURL)
+
+	err := waitForCondition(90*time.Second, 500*time.Millisecond, func() (bool, error) {
+		leaderMetrics, followerMetrics, fetchErr := fetchMetricsPair(
+			harness.httpClient,
+			harness.leaderURL,
+			harness.followerURL,
+		)
+		if fetchErr != nil {
+			return false, fetchErr
+		}
+
+		requiredNames := []string{
+			scrape.MetricCopilotCodeAcceptanceActivity,
+			scrape.MetricCopilotCodeGenerationActivity,
+			scrape.MetricCopilotLOCAdded,
+		}
+		for _, metricName := range requiredNames {
+			if !hasMetricName(leaderMetrics, metricName) || !hasMetricName(followerMetrics, metricName) {
+				return false, nil
+			}
+		}
+
+		leaderCopilot := extractMetricLineSet(leaderMetrics, "gh_copilot_usage_")
+		followerCopilot := extractMetricLineSet(followerMetrics, "gh_copilot_usage_")
+		if len(leaderCopilot) == 0 || len(followerCopilot) == 0 {
+			return false, nil
+		}
+		return equalStringSets(leaderCopilot, followerCopilot), nil
+	})
+	if err != nil {
+		t.Fatalf("copilot metrics did not converge: %v", err)
+	}
+}
+
+func TestRuntimeCopilotDisabledEmitsNoCopilotSeries(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	fixture := seedFixtureWithTwoOrganizations(t, now)
+	orgs := []config.GitHubOrgConfig{
+		{
+			Org:               "cam3ron2",
+			AppID:             1,
+			InstallationID:    1001,
+			ScrapeInterval:    200 * time.Millisecond,
+			PerOrgConcurrency: 2,
+		},
+	}
+
+	harness := newRealScraperDualRuntimeHarness(t, fixture, orgs, func(cfg *config.Config) {
+		cfg.Copilot.Enabled = false
+	})
+	waitForLeaderFollowerReady(t, harness.httpClient, harness.leaderURL, harness.followerURL)
+
+	err := waitForCondition(60*time.Second, 500*time.Millisecond, func() (bool, error) {
+		leaderMetrics, followerMetrics, fetchErr := fetchMetricsPair(
+			harness.httpClient,
+			harness.leaderURL,
+			harness.followerURL,
+		)
+		if fetchErr != nil {
+			return false, fetchErr
+		}
+		if !hasMetricName(leaderMetrics, scrape.MetricActivityCommits24h) {
+			return false, nil
+		}
+		if hasMetricPrefix(leaderMetrics, "gh_copilot_usage_") {
+			return false, nil
+		}
+		if hasMetricPrefix(followerMetrics, "gh_copilot_usage_") {
+			return false, nil
+		}
+		return true, nil
+	})
+	if err != nil {
+		t.Fatalf("copilot disabled assertions did not converge: %v", err)
+	}
+}
+
+func TestCopilotBackfillRecoveryOnFollower(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	fixture := newFakeGitHubAPI(t)
+	fixture.SetOrgRepos("cam3ron2", []string{"repo-a"})
+	fixture.SetRepository("cam3ron2", "repo-a", buildRepositoryFixture(now, "alice"))
+	fixture.FailPath("/orgs/cam3ron2/copilot/metrics/reports/organization-28-day/latest", http.StatusServiceUnavailable, 1)
+
+	orgs := []config.GitHubOrgConfig{
+		{
+			Org:               "cam3ron2",
+			AppID:             1,
+			InstallationID:    1001,
+			ScrapeInterval:    10 * time.Minute,
+			PerOrgConcurrency: 1,
+		},
+	}
+	harness := newRealScraperSingleRuntimeHarness(t, fixture, orgs, func(cfg *config.Config) {
+		cfg.Copilot.Enabled = true
+		cfg.Copilot.IncludeOrg28d = true
+		cfg.Copilot.IncludeOrgUsers28d = false
+		cfg.Copilot.ScrapeInterval = time.Minute
+	})
+
+	if err := harness.runtime.RunLeaderOrgCycle(harness.ctx, orgs[0]); err != nil {
+		t.Fatalf("leader run should enqueue copilot backfill without failing cycle: %v", err)
+	}
+	points := harness.runtime.Store().Snapshot()
+	if value, found := snapshotMetricValue(
+		points,
+		"gh_exporter_backfill_jobs_enqueued_total",
+		map[string]string{"org": "cam3ron2", "reason": "copilot_report_fetch_error"},
+	); !found || value < 1 {
+		t.Fatalf("expected copilot backfill enqueue metric after leader cycle")
+	}
+	if harness.runtime.QueueDepth() == 0 {
+		t.Fatalf("leader cycle should enqueue at least one copilot backfill message")
+	}
+
+	harness.runtime.StartFollower(harness.ctx)
+	t.Cleanup(harness.runtime.StopFollower)
+
+	var lastPoints []store.MetricPoint
+	err := waitForCondition(45*time.Second, 200*time.Millisecond, func() (bool, error) {
+		points := harness.runtime.Store().Snapshot()
+		lastPoints = points
+		processed, foundProcessed := snapshotMetricValue(
+			points,
+			"gh_exporter_backfill_jobs_processed_total",
+			map[string]string{
+				"org":    "cam3ron2",
+				"repo":   "__copilot__org__28d",
+				"result": "processed",
+			},
+		)
+		if !foundProcessed || processed < 1 {
+			return false, nil
+		}
+
+		accepted, foundAccepted := snapshotMetricValue(
+			points,
+			scrape.MetricCopilotCodeAcceptanceActivity,
+			map[string]string{"org": "cam3ron2", "repo": "*", "user": "all"},
+		)
+		if !foundAccepted || accepted <= 0 {
+			return false, nil
+		}
+		return harness.runtime.QueueDepth() == 0, nil
+	})
+	if err != nil {
+		failed, _ := snapshotMetricValue(
+			lastPoints,
+			"gh_exporter_backfill_jobs_processed_total",
+			map[string]string{
+				"org":    "cam3ron2",
+				"repo":   "__copilot__org__28d",
+				"result": "failed",
+			},
+		)
+		t.Fatalf(
+			"follower did not recover copilot backfill message: %v (queue_depth=%d failed_count=%v metrics=%d)",
+			err,
+			harness.runtime.QueueDepth(),
+			failed,
+			len(lastPoints),
+		)
+	}
+}
+
 func TestBackfillFlowProcessesMissedWindowOnFollower(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	fixture := newFakeGitHubAPI(t)
@@ -315,7 +508,7 @@ func newRealScraperDualRuntimeHarness(
 	if override != nil {
 		override(cfg)
 	}
-	orgScraper := newFixtureOrgScraper(t, fixture.URL(), orgs, time.Now)
+	orgScraper := newFixtureOrgScraper(t, cfg, time.Now)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -362,7 +555,7 @@ func newRealScraperSingleRuntimeHarness(
 	if override != nil {
 		override(cfg)
 	}
-	orgScraper := newFixtureOrgScraper(t, fixture.URL(), orgs, time.Now)
+	orgScraper := newFixtureOrgScraper(t, cfg, time.Now)
 	runtime := app.NewRuntime(cfg, orgScraper, zap.NewNop())
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -433,25 +626,43 @@ func buildRealScraperConfig(
 
 func newFixtureOrgScraper(
 	t *testing.T,
-	apiBaseURL string,
-	orgs []config.GitHubOrgConfig,
+	cfg *config.Config,
 	nowFn func() time.Time,
 ) scrape.OrgScraper {
 	t.Helper()
 
-	clients := make(map[string]scrape.GitHubDataClient, len(orgs))
-	for _, org := range orgs {
+	clients := make(map[string]scrape.GitHubDataClient, len(cfg.GitHub.Orgs))
+	primaryOrg := ""
+	for _, org := range cfg.GitHub.Orgs {
+		if primaryOrg == "" {
+			primaryOrg = org.Org
+		}
 		httpClient := &http.Client{Timeout: 2 * time.Second}
 		requestClient := githubapi.NewClient(httpClient, githubapi.RetryConfig{
 			MaxAttempts:    1,
 			InitialBackoff: 20 * time.Millisecond,
 			MaxBackoff:     20 * time.Millisecond,
 		}, githubapi.RateLimitPolicy{})
-		dataClient, err := githubapi.NewDataClient(apiBaseURL, requestClient)
+		dataClient, err := githubapi.NewDataClient(cfg.GitHub.APIBaseURL, requestClient)
 		if err != nil {
 			t.Fatalf("create data client for %q: %v", org.Org, err)
 		}
 		clients[org.Org] = dataClient
+	}
+
+	var enterpriseClient scrape.GitHubDataClient
+	if cfg.Copilot.Enabled && cfg.Copilot.Enterprise.Enabled {
+		httpClient := &http.Client{Timeout: 2 * time.Second}
+		requestClient := githubapi.NewClient(httpClient, githubapi.RetryConfig{
+			MaxAttempts:    1,
+			InitialBackoff: 20 * time.Millisecond,
+			MaxBackoff:     20 * time.Millisecond,
+		}, githubapi.RateLimitPolicy{})
+		dataClient, err := githubapi.NewDataClient(cfg.GitHub.APIBaseURL, requestClient)
+		if err != nil {
+			t.Fatalf("create enterprise data client: %v", err)
+		}
+		enterpriseClient = dataClient
 	}
 
 	return scrape.NewGitHubOrgScraper(clients, scrape.GitHubOrgScraperConfig{
@@ -459,8 +670,11 @@ func newFixtureOrgScraper(
 		FallbackEnabled:                           true,
 		FallbackMaxCommitsPerRepoPerWeek:          500,
 		FallbackMaxCommitDetailCallsPerOrgPerHour: 5000,
-		Now:   nowFn,
-		Sleep: func(time.Duration) {},
+		Copilot:                     cfg.Copilot,
+		CopilotEnterpriseClient:     enterpriseClient,
+		CopilotEnterprisePrimaryOrg: primaryOrg,
+		Now:                         nowFn,
+		Sleep:                       func(time.Duration) {},
 	})
 }
 
@@ -566,6 +780,15 @@ func hasMetricName(metrics string, metricName string) bool {
 	prefix := metricName + "{"
 	for _, line := range strings.Split(metrics, "\n") {
 		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasMetricPrefix(metrics string, metricPrefix string) bool {
+	for _, line := range strings.Split(metrics, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), metricPrefix) {
 			return true
 		}
 	}

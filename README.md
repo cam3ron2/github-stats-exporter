@@ -35,6 +35,18 @@ GitHub provides rich APIs for organizational and contributor activity, but extra
   - `gh_activity_loc_added_weekly{org,repo,user}`
   - `gh_activity_loc_removed_weekly{org,repo,user}`
   - `gh_activity_last_event_unixtime{org,repo,user}`
+- **Business metrics (optional Copilot usage):**
+  - `gh_copilot_usage_user_initiated_interaction_count{org,repo,user,...}`
+  - `gh_copilot_usage_code_generation_activity_count{org,repo,user,...}`
+  - `gh_copilot_usage_code_acceptance_activity_count{org,repo,user,...}`
+  - `gh_copilot_usage_loc_suggested_to_add_sum{org,repo,user,...}`
+  - `gh_copilot_usage_loc_suggested_to_delete_sum{org,repo,user,...}`
+  - `gh_copilot_usage_loc_added_sum{org,repo,user,...}`
+  - `gh_copilot_usage_loc_deleted_sum{org,repo,user,...}`
+  - `gh_copilot_usage_pull_requests_total_created{org,repo,user,...}`
+  - `gh_copilot_usage_pull_requests_total_reviewed{org,repo,user,...}`
+  - `gh_copilot_usage_pull_requests_total_created_by_copilot{org,repo,user,...}`
+  - `gh_copilot_usage_pull_requests_total_reviewed_by_copilot{org,repo,user,...}`
 - **Operational metrics (exporter/runtime):**
   - scrape outcomes and durations
   - GitHub rate-limit and request counters
@@ -184,6 +196,34 @@ Prometheus scrape and alert examples are in:
 - Runtime operations and failure behavior: [docs/internal/runtime_operational_runbook.md](docs/internal/runtime_operational_runbook.md)
 - Load and resilience checks: [docs/internal/load_and_resilience_validation.md](docs/internal/load_and_resilience_validation.md)
 
+### Optional Copilot metrics
+
+Copilot scraping is optional and disabled by default. Enable it only after app
+permissions are configured for Copilot usage endpoints.
+
+```yaml
+copilot:
+  enabled: true
+  scrape_interval: "6h"
+  include_org_28d: true
+  include_org_users_28d: false
+  include_pull_request_activity: true
+  user_label_mode: "hashed"
+  max_records_per_report: 0
+  max_users_per_report: 0
+  enterprise:
+    enabled: false
+```
+
+Operational behavior when enabled:
+
+- Leader fetches report-link endpoints and downloads signed NDJSON payloads.
+- Failed link/download/parse paths enqueue backfill jobs using 1-day endpoints.
+- Optional guardrails cap user/record volume and emit
+  `gh_exporter_copilot_records_dropped_total{scope,reason}`.
+- Dependency health is split per Copilot path family in
+  `gh_exporter_dependency_health{dependency=...}`.
+
 ## CI/CD and release model
 
 - PR testing: `.github/workflows/test.yml`
@@ -223,3 +263,8 @@ make lint
 - LOC metrics source data from GitHub's `/stats/contributors` endpoint as their primary source; this is summary-oriented, not real-time. Summaries are updated by GitHub on their own schedule (often daily) and may lag behind real-time activity, but they are more efficient and less rate-limit prone than commit-level data.
   - The fallback LOC mode using `/commits` and `/commits/{sha}` is _considerably_ more API intensive and should be used with caution, especially at scale. It may not be feasible to run regularly for large orgs/repos due to rate limits and performance, as this will cause _every commit_ in the scrape window to require two API calls (one for listing and one for details).
 - Backfill and cooldown logic prioritize continuity and API safety over immediate freshness during GitHub outages.
+- Copilot metrics are report-based snapshots, not event streams:
+  - freshness is bounded by GitHub report generation cadence
+  - org and enterprise totals are not strictly additive in all cases
+  - signed report download hosts may require explicit egress policy allowances
+    in locked-down Kubernetes environments.

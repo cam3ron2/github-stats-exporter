@@ -22,10 +22,14 @@ func NewOrgScraperFromConfig(cfg *config.Config) (OrgScraper, error) {
 	}
 
 	clients := make(map[string]GitHubDataClient, len(cfg.GitHub.Orgs))
+	primaryOrg := ""
 	for _, orgCfg := range cfg.GitHub.Orgs {
 		orgName := strings.TrimSpace(orgCfg.Org)
 		if orgName == "" {
 			return nil, fmt.Errorf("organization name is required")
+		}
+		if primaryOrg == "" {
+			primaryOrg = orgName
 		}
 
 		httpClient, err := githubapi.NewInstallationHTTPClient(githubapi.InstallationAuthConfig{
@@ -56,6 +60,36 @@ func NewOrgScraperFromConfig(cfg *config.Config) (OrgScraper, error) {
 		clients[orgName] = dataClient
 	}
 
+	var enterpriseClient GitHubDataClient
+	if cfg.Copilot.Enabled && cfg.Copilot.Enterprise.Enabled {
+		httpClient, err := githubapi.NewInstallationHTTPClient(githubapi.InstallationAuthConfig{
+			AppID:          cfg.Copilot.Enterprise.AppID,
+			InstallationID: cfg.Copilot.Enterprise.InstallationID,
+			PrivateKeyPath: cfg.Copilot.Enterprise.PrivateKeyPath,
+			Timeout:        timeout,
+			BaseTransport:  http.DefaultTransport,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("create installation client for copilot enterprise: %w", err)
+		}
+
+		requestClient := githubapi.NewClient(httpClient, githubapi.RetryConfig{
+			MaxAttempts:    cfg.Retry.MaxAttempts,
+			InitialBackoff: cfg.Retry.InitialBackoff,
+			MaxBackoff:     cfg.Retry.MaxBackoff,
+		}, githubapi.RateLimitPolicy{
+			MinRemainingThreshold: cfg.RateLimit.MinRemainingThreshold,
+			MinResetBuffer:        cfg.RateLimit.MinResetBuffer,
+			SecondaryLimitBackoff: cfg.RateLimit.SecondaryLimitBackoff,
+		})
+
+		dataClient, err := githubapi.NewDataClient(cfg.GitHub.APIBaseURL, requestClient)
+		if err != nil {
+			return nil, fmt.Errorf("create data client for copilot enterprise: %w", err)
+		}
+		enterpriseClient = dataClient
+	}
+
 	return NewGitHubOrgScraper(clients, GitHubOrgScraperConfig{
 		LOCRefreshInterval:                        cfg.LOC.RefreshInterval,
 		FallbackEnabled:                           cfg.LOC.FallbackEnabled,
@@ -63,5 +97,8 @@ func NewOrgScraperFromConfig(cfg *config.Config) (OrgScraper, error) {
 		FallbackMaxCommitDetailCallsPerOrgPerHour: cfg.LOC.FallbackMaxCommitDetailCallsPerOrgPerHour,
 		LargeRepoZeroDetectionWindows:             cfg.LOC.LargeRepoZeroDetectionWindows,
 		LargeRepoCooldown:                         cfg.LOC.LargeRepoCooldown,
+		Copilot:                                   cfg.Copilot,
+		CopilotEnterpriseClient:                   enterpriseClient,
+		CopilotEnterprisePrimaryOrg:               primaryOrg,
 	}), nil
 }

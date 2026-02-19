@@ -14,6 +14,7 @@ import (
 )
 
 var validLogLevels = []string{"debug", "info", "warn", "error"}
+var validCopilotUserLabelModes = []string{"login", "id", "hashed", "none"}
 
 // Config is the root application configuration.
 type Config struct {
@@ -21,6 +22,7 @@ type Config struct {
 	Metrics        MetricsConfig
 	LeaderElection LeaderElectionConfig
 	GitHub         GitHubConfig
+	Copilot        CopilotConfig
 	RateLimit      RateLimitConfig
 	Retry          RetryConfig
 	LOC            LOCConfig
@@ -71,6 +73,38 @@ type GitHubOrgConfig struct {
 	ScrapeInterval    time.Duration
 	RepoAllowlist     []string `yaml:"repo_allowlist"`
 	PerOrgConcurrency int      `yaml:"per_org_concurrency"`
+}
+
+// CopilotConfig configures optional GitHub Copilot usage scraping.
+type CopilotConfig struct {
+	Enabled                    bool
+	ScrapeInterval             time.Duration
+	RequestTimeout             time.Duration
+	DownloadTimeout            time.Duration
+	IncludeOrg28d              bool
+	IncludeOrgUsers28d         bool
+	IncludeEnterprise28d       bool
+	IncludeEnterpriseUsers28d  bool
+	IncludeBreakdownIDE        bool
+	IncludeBreakdownFeature    bool
+	IncludeBreakdownLanguage   bool
+	IncludeBreakdownModel      bool
+	IncludePullRequestActivity bool
+	UserLabelMode              string
+	EmitDayLabel               bool
+	MaxRecordsPerReport        int
+	MaxUsersPerReport          int
+	RefreshIfReportUnchanged   bool
+	Enterprise                 CopilotEnterpriseConfig
+}
+
+// CopilotEnterpriseConfig configures enterprise-scope Copilot scraping.
+type CopilotEnterpriseConfig struct {
+	Enabled        bool
+	Slug           string
+	AppID          int64
+	InstallationID int64
+	PrivateKeyPath string
 }
 
 // RateLimitConfig configures rate-limit controls.
@@ -231,6 +265,8 @@ func (c *Config) Validate() error {
 		errs = append(errs, "backfill.requeue_delays must contain at least one duration")
 	}
 
+	errs = append(errs, validateCopilot(c.Copilot)...)
+
 	if len(errs) > 0 {
 		return errors.New(strings.Join(errs, "; "))
 	}
@@ -252,6 +288,22 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Store.ExportCacheMode == "" {
 		cfg.Store.ExportCacheMode = "incremental"
+	}
+	if cfg.Copilot.ScrapeInterval <= 0 {
+		cfg.Copilot.ScrapeInterval = 6 * time.Hour
+	}
+	if cfg.Copilot.RequestTimeout <= 0 {
+		cfg.Copilot.RequestTimeout = 30 * time.Second
+	}
+	if cfg.Copilot.DownloadTimeout <= 0 {
+		cfg.Copilot.DownloadTimeout = 90 * time.Second
+	}
+	if cfg.Copilot.UserLabelMode == "" {
+		cfg.Copilot.UserLabelMode = "login"
+	}
+	if !cfg.Copilot.Enterprise.Enabled {
+		cfg.Copilot.IncludeEnterprise28d = false
+		cfg.Copilot.IncludeEnterpriseUsers28d = false
 	}
 }
 
@@ -316,6 +368,7 @@ type rawConfig struct {
 	Metrics        MetricsConfig     `yaml:"metrics"`
 	LeaderElection rawLeaderElection `yaml:"leader_election"`
 	GitHub         rawGitHub         `yaml:"github"`
+	Copilot        rawCopilot        `yaml:"copilot"`
 	RateLimit      rawRateLimit      `yaml:"rate_limit"`
 	Retry          rawRetry          `yaml:"retry"`
 	LOC            rawLOC            `yaml:"loc"`
@@ -351,6 +404,36 @@ type rawGitHubOrg struct {
 	ScrapeInterval    duration `yaml:"scrape_interval"`
 	RepoAllowlist     []string `yaml:"repo_allowlist"`
 	PerOrgConcurrency int      `yaml:"per_org_concurrency"`
+}
+
+type rawCopilot struct {
+	Enabled                    bool                 `yaml:"enabled"`
+	ScrapeInterval             duration             `yaml:"scrape_interval"`
+	RequestTimeout             duration             `yaml:"request_timeout"`
+	DownloadTimeout            duration             `yaml:"download_timeout"`
+	IncludeOrg28d              *bool                `yaml:"include_org_28d"`
+	IncludeOrgUsers28d         *bool                `yaml:"include_org_users_28d"`
+	IncludeEnterprise28d       *bool                `yaml:"include_enterprise_28d"`
+	IncludeEnterpriseUsers28d  *bool                `yaml:"include_enterprise_users_28d"`
+	IncludeBreakdownIDE        *bool                `yaml:"include_breakdown_ide"`
+	IncludeBreakdownFeature    *bool                `yaml:"include_breakdown_feature"`
+	IncludeBreakdownLanguage   *bool                `yaml:"include_breakdown_language"`
+	IncludeBreakdownModel      *bool                `yaml:"include_breakdown_model"`
+	IncludePullRequestActivity *bool                `yaml:"include_pull_request_activity"`
+	UserLabelMode              string               `yaml:"user_label_mode"`
+	EmitDayLabel               bool                 `yaml:"emit_day_label"`
+	MaxRecordsPerReport        int                  `yaml:"max_records_per_report"`
+	MaxUsersPerReport          int                  `yaml:"max_users_per_report"`
+	RefreshIfReportUnchanged   bool                 `yaml:"refresh_if_report_unchanged"`
+	Enterprise                 rawCopilotEnterprise `yaml:"enterprise"`
+}
+
+type rawCopilotEnterprise struct {
+	Enabled        bool   `yaml:"enabled"`
+	Slug           string `yaml:"slug"`
+	AppID          int64  `yaml:"app_id"`
+	InstallationID int64  `yaml:"installation_id"`
+	PrivateKeyPath string `yaml:"private_key_path"`
 }
 
 type rawRateLimit struct {
@@ -432,6 +515,33 @@ func (r rawConfig) toConfig() *Config {
 			UnhealthyCooldown:         r.GitHub.UnhealthyCooldown.Duration,
 			Orgs:                      make([]GitHubOrgConfig, 0, len(r.GitHub.Orgs)),
 		},
+		Copilot: CopilotConfig{
+			Enabled:                    r.Copilot.Enabled,
+			ScrapeInterval:             r.Copilot.ScrapeInterval.Duration,
+			RequestTimeout:             r.Copilot.RequestTimeout.Duration,
+			DownloadTimeout:            r.Copilot.DownloadTimeout.Duration,
+			IncludeOrg28d:              boolOrDefault(r.Copilot.IncludeOrg28d, true),
+			IncludeOrgUsers28d:         boolOrDefault(r.Copilot.IncludeOrgUsers28d, false),
+			IncludeEnterprise28d:       boolOrDefault(r.Copilot.IncludeEnterprise28d, false),
+			IncludeEnterpriseUsers28d:  boolOrDefault(r.Copilot.IncludeEnterpriseUsers28d, false),
+			IncludeBreakdownIDE:        boolOrDefault(r.Copilot.IncludeBreakdownIDE, false),
+			IncludeBreakdownFeature:    boolOrDefault(r.Copilot.IncludeBreakdownFeature, false),
+			IncludeBreakdownLanguage:   boolOrDefault(r.Copilot.IncludeBreakdownLanguage, false),
+			IncludeBreakdownModel:      boolOrDefault(r.Copilot.IncludeBreakdownModel, false),
+			IncludePullRequestActivity: boolOrDefault(r.Copilot.IncludePullRequestActivity, true),
+			UserLabelMode:              r.Copilot.UserLabelMode,
+			EmitDayLabel:               r.Copilot.EmitDayLabel,
+			MaxRecordsPerReport:        r.Copilot.MaxRecordsPerReport,
+			MaxUsersPerReport:          r.Copilot.MaxUsersPerReport,
+			RefreshIfReportUnchanged:   r.Copilot.RefreshIfReportUnchanged,
+			Enterprise: CopilotEnterpriseConfig{
+				Enabled:        r.Copilot.Enterprise.Enabled,
+				Slug:           r.Copilot.Enterprise.Slug,
+				AppID:          r.Copilot.Enterprise.AppID,
+				InstallationID: r.Copilot.Enterprise.InstallationID,
+				PrivateKeyPath: r.Copilot.Enterprise.PrivateKeyPath,
+			},
+		},
 		RateLimit: RateLimitConfig{
 			MinRemainingThreshold: r.RateLimit.MinRemainingThreshold,
 			MinResetBuffer:        r.RateLimit.MinResetBuffer.Duration,
@@ -504,4 +614,58 @@ func (r rawConfig) toConfig() *Config {
 	}
 
 	return cfg
+}
+
+func validateCopilot(c CopilotConfig) []string {
+	if !c.Enabled {
+		return nil
+	}
+
+	var errs []string
+	if c.ScrapeInterval <= 0 {
+		errs = append(errs, "copilot.scrape_interval must be > 0 when copilot.enabled=true")
+	}
+	if c.RequestTimeout <= 0 {
+		errs = append(errs, "copilot.request_timeout must be > 0 when copilot.enabled=true")
+	}
+	if c.DownloadTimeout <= 0 {
+		errs = append(errs, "copilot.download_timeout must be > 0 when copilot.enabled=true")
+	}
+	if !slices.Contains(validCopilotUserLabelModes, c.UserLabelMode) {
+		errs = append(errs, "copilot.user_label_mode must be one of login|id|hashed|none")
+	}
+	if c.MaxRecordsPerReport < 0 {
+		errs = append(errs, "copilot.max_records_per_report must be >= 0")
+	}
+	if c.MaxUsersPerReport < 0 {
+		errs = append(errs, "copilot.max_users_per_report must be >= 0")
+	}
+	if c.Enterprise.Enabled {
+		if strings.TrimSpace(c.Enterprise.Slug) == "" {
+			errs = append(errs, "copilot.enterprise.slug is required when copilot.enterprise.enabled=true")
+		}
+		if c.Enterprise.AppID <= 0 {
+			errs = append(errs, "copilot.enterprise.app_id must be > 0 when copilot.enterprise.enabled=true")
+		}
+		if c.Enterprise.InstallationID <= 0 {
+			errs = append(
+				errs,
+				"copilot.enterprise.installation_id must be > 0 when copilot.enterprise.enabled=true",
+			)
+		}
+		if strings.TrimSpace(c.Enterprise.PrivateKeyPath) == "" {
+			errs = append(
+				errs,
+				"copilot.enterprise.private_key_path is required when copilot.enterprise.enabled=true",
+			)
+		}
+	}
+	return errs
+}
+
+func boolOrDefault(raw *bool, defaultValue bool) bool {
+	if raw == nil {
+		return defaultValue
+	}
+	return *raw
 }

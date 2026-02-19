@@ -183,6 +183,9 @@ func (f *fakeGitHubAPI) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	segments := splitPath(path)
+	if f.handleCopilotRoutes(w, r, segments) {
+		return
+	}
 	if len(segments) == 3 && segments[0] == "orgs" && segments[2] == "repos" {
 		f.handleOwnerRepos(w, segments[1], true)
 		return
@@ -197,6 +200,143 @@ func (f *fakeGitHubAPI) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	f.writeJSON(w, http.StatusNotFound, map[string]string{"message": "not found"})
+}
+
+func (f *fakeGitHubAPI) handleCopilotRoutes(w http.ResponseWriter, r *http.Request, segments []string) bool {
+	if len(segments) >= 6 &&
+		segments[0] == "orgs" &&
+		segments[2] == "copilot" &&
+		segments[3] == "metrics" &&
+		segments[4] == "reports" {
+		owner := segments[1]
+		reportPath := strings.Join(segments[5:], "/")
+		day := strings.TrimSpace(r.URL.Query().Get("date"))
+		f.writeCopilotReportLink(w, "orgs", owner, reportPath, day)
+		return true
+	}
+
+	if len(segments) >= 6 &&
+		segments[0] == "enterprises" &&
+		segments[2] == "copilot" &&
+		segments[3] == "metrics" &&
+		segments[4] == "reports" {
+		owner := segments[1]
+		reportPath := strings.Join(segments[5:], "/")
+		day := strings.TrimSpace(r.URL.Query().Get("date"))
+		f.writeCopilotReportLink(w, "enterprises", owner, reportPath, day)
+		return true
+	}
+
+	if len(segments) >= 4 && segments[0] == "copilot-download" {
+		scope := segments[1]
+		owner := segments[2]
+		reportPath := strings.Join(segments[3:], "/")
+		day := strings.TrimSpace(r.URL.Query().Get("date"))
+		f.writeCopilotReportPayload(w, scope, owner, reportPath, day)
+		return true
+	}
+
+	return false
+}
+
+func (f *fakeGitHubAPI) writeCopilotReportLink(
+	w http.ResponseWriter,
+	scope string,
+	owner string,
+	reportPath string,
+	day string,
+) {
+	if scope == "orgs" {
+		if _, ok := f.getReposForOrg(owner); !ok {
+			f.writeJSON(w, http.StatusNotFound, map[string]string{"message": "not found"})
+			return
+		}
+	}
+	if strings.TrimSpace(reportPath) == "" {
+		f.writeJSON(w, http.StatusBadRequest, map[string]string{"message": "invalid report path"})
+		return
+	}
+
+	nowUTC := time.Now().UTC()
+	reportEnd := nowUTC.Truncate(24 * time.Hour)
+	reportStart := reportEnd.Add(-27 * 24 * time.Hour)
+	reportDay := day
+	if strings.Contains(reportPath, "1-day") {
+		if reportDay == "" {
+			reportDay = nowUTC.Format("2006-01-02")
+		}
+		parsedDay, err := time.Parse("2006-01-02", reportDay)
+		if err == nil {
+			reportEnd = parsedDay.UTC()
+			reportStart = parsedDay.UTC()
+		}
+	}
+
+	downloadURL := fmt.Sprintf(
+		"%s/copilot-download/%s/%s/%s",
+		strings.TrimRight(f.server.URL, "/"),
+		scope,
+		owner,
+		reportPath,
+	)
+	if reportDay != "" {
+		downloadURL += "?date=" + reportDay
+	}
+
+	payload := map[string]any{
+		"url":              downloadURL,
+		"download_links":   []string{downloadURL},
+		"report_start_day": reportStart.Format("2006-01-02"),
+		"report_end_day":   reportEnd.Format("2006-01-02"),
+		"expires_at":       nowUTC.Add(time.Hour).Format(time.RFC3339),
+	}
+	if reportDay != "" {
+		payload["report_day"] = reportDay
+	}
+	f.writeJSON(w, http.StatusOK, payload)
+}
+
+func (f *fakeGitHubAPI) writeCopilotReportPayload(
+	w http.ResponseWriter,
+	scope string,
+	owner string,
+	reportPath string,
+	day string,
+) {
+	nowUTC := time.Now().UTC()
+	reportDay := day
+	if reportDay == "" {
+		reportDay = nowUTC.Format("2006-01-02")
+	}
+
+	base := float64(len(strings.TrimSpace(owner)) + len(strings.TrimSpace(scope)))
+	record := map[string]any{
+		"total_code_acceptances":                  base + 3,
+		"total_code_suggestions":                  base + 9,
+		"total_code_lines_suggested":              base + 100,
+		"total_code_lines_accepted":               base + 80,
+		"total_pull_requests_created":             base + 2,
+		"total_pull_requests_reviewed":            base + 1,
+		"total_pull_requests_created_by_copilot":  base + 1,
+		"total_pull_requests_reviewed_by_copilot": base + 1,
+		"day": reportDay,
+	}
+	if strings.HasPrefix(reportPath, "users-") {
+		record["user_login"] = strings.ToLower(owner) + "-copilot-user"
+		record["user_id"] = strconv.Itoa(len(owner) + 1000)
+	}
+
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("X-RateLimit-Remaining", "4500")
+	w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(nowUTC.Add(time.Hour).Unix(), 10))
+	w.WriteHeader(http.StatusOK)
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		return
+	}
+	if _, err := w.Write(append(encoded, '\n')); err != nil {
+		return
+	}
 }
 
 func (f *fakeGitHubAPI) incrementCall(path string) {

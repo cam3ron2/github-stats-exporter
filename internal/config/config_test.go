@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -630,4 +631,293 @@ store:
 			}
 		})
 	}
+}
+
+func TestLoadCopilotConfig(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name          string
+		copilotYAML   string
+		wantErr       bool
+		errSubstrings []string
+		assert        func(t *testing.T, cfg *Config)
+	}{
+		{
+			name:        "missing_copilot_uses_defaults",
+			copilotYAML: "",
+			assert: func(t *testing.T, cfg *Config) {
+				t.Helper()
+				if cfg.Copilot.Enabled {
+					t.Fatalf("Copilot.Enabled = true, want false")
+				}
+				if !cfg.Copilot.IncludeOrg28d {
+					t.Fatalf("Copilot.IncludeOrg28d = false, want true")
+				}
+				if cfg.Copilot.UserLabelMode != "login" {
+					t.Fatalf(
+						"Copilot.UserLabelMode = %q, want login",
+						cfg.Copilot.UserLabelMode,
+					)
+				}
+			},
+		},
+		{
+			name: "enabled_org_only",
+			copilotYAML: `
+copilot:
+  enabled: true
+  scrape_interval: "6h"
+  request_timeout: "30s"
+  download_timeout: "90s"
+  include_org_28d: true
+  include_org_users_28d: true
+  include_enterprise_28d: false
+  include_enterprise_users_28d: false
+  include_breakdown_ide: false
+  include_breakdown_feature: false
+  include_breakdown_language: false
+  include_breakdown_model: false
+  include_pull_request_activity: true
+  user_label_mode: "hashed"
+  emit_day_label: true
+  max_records_per_report: 20000
+  max_users_per_report: 5000
+  refresh_if_report_unchanged: true
+  enterprise:
+    enabled: false
+    slug: ""
+    app_id: 0
+    installation_id: 0
+    private_key_path: ""
+`,
+			assert: func(t *testing.T, cfg *Config) {
+				t.Helper()
+				if !cfg.Copilot.Enabled {
+					t.Fatalf("Copilot.Enabled = false, want true")
+				}
+				if cfg.Copilot.ScrapeInterval != 6*time.Hour {
+					t.Fatalf(
+						"Copilot.ScrapeInterval = %s, want %s",
+						cfg.Copilot.ScrapeInterval,
+						6*time.Hour,
+					)
+				}
+				if cfg.Copilot.UserLabelMode != "hashed" {
+					t.Fatalf(
+						"Copilot.UserLabelMode = %q, want hashed",
+						cfg.Copilot.UserLabelMode,
+					)
+				}
+				if !cfg.Copilot.EmitDayLabel {
+					t.Fatalf("Copilot.EmitDayLabel = false, want true")
+				}
+				if !cfg.Copilot.RefreshIfReportUnchanged {
+					t.Fatalf(
+						"Copilot.RefreshIfReportUnchanged = false, want true",
+					)
+				}
+			},
+		},
+		{
+			name: "enterprise_disabled_coerces_enterprise_flags",
+			copilotYAML: `
+copilot:
+  enabled: true
+  include_enterprise_28d: true
+  include_enterprise_users_28d: true
+  enterprise:
+    enabled: false
+`,
+			assert: func(t *testing.T, cfg *Config) {
+				t.Helper()
+				if cfg.Copilot.IncludeEnterprise28d {
+					t.Fatalf(
+						"Copilot.IncludeEnterprise28d = true, want false",
+					)
+				}
+				if cfg.Copilot.IncludeEnterpriseUsers28d {
+					t.Fatalf(
+						"Copilot.IncludeEnterpriseUsers28d = true, want false",
+					)
+				}
+			},
+		},
+		{
+			name: "enterprise_enabled_requires_credentials",
+			copilotYAML: `
+copilot:
+  enabled: true
+  include_enterprise_28d: true
+  enterprise:
+    enabled: true
+`,
+			wantErr: true,
+			errSubstrings: []string{
+				"copilot.enterprise.slug",
+				"copilot.enterprise.app_id",
+				"copilot.enterprise.installation_id",
+				"copilot.enterprise.private_key_path",
+			},
+		},
+		{
+			name: "invalid_user_label_mode",
+			copilotYAML: `
+copilot:
+  enabled: true
+  user_label_mode: "email"
+`,
+			wantErr:       true,
+			errSubstrings: []string{"copilot.user_label_mode"},
+		},
+		{
+			name: "negative_limits_rejected",
+			copilotYAML: `
+copilot:
+  enabled: true
+  max_records_per_report: -1
+  max_users_per_report: -1
+`,
+			wantErr: true,
+			errSubstrings: []string{
+				"copilot.max_records_per_report",
+				"copilot.max_users_per_report",
+			},
+		},
+		{
+			name: "disabled_copilot_does_not_require_enterprise_credentials",
+			copilotYAML: `
+copilot:
+  enabled: false
+  enterprise:
+    enabled: true
+`,
+			assert: func(t *testing.T, cfg *Config) {
+				t.Helper()
+				if cfg.Copilot.Enabled {
+					t.Fatalf("Copilot.Enabled = true, want false")
+				}
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg, err := Load(strings.NewReader(baseConfigYAML(tc.copilotYAML)))
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("Load() expected error, got nil")
+				}
+				for _, expected := range tc.errSubstrings {
+					if !strings.Contains(err.Error(), expected) {
+						t.Fatalf(
+							"Load() error = %q, missing %q",
+							err.Error(),
+							expected,
+						)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load() unexpected error: %v", err)
+			}
+			if tc.assert != nil {
+				tc.assert(t, cfg)
+			}
+		})
+	}
+}
+
+func baseConfigYAML(extraSections ...string) string {
+	sections := []string{
+		`server:
+  listen_addr: ":8080"
+  log_level: "info"
+metrics:
+  topology: "single_service_target"
+  scrape_service_dns: "github-stats-exporter-metrics.github-stats-exporter.svc.cluster.local:8080"
+leader_election:
+  enabled: false
+  namespace: "github-stats-exporter"
+  lease_name: "github-stats-exporter-leader"
+  lease_duration: "30s"
+  renew_deadline: "20s"
+  retry_period: "5s"
+github:
+  api_base_url: "https://api.github.com"
+  request_timeout: "20s"
+  unhealthy_failure_threshold: 6
+  unhealthy_cooldown: "2m"
+  orgs:
+    - org: "org-a"
+      app_id: 111111
+      installation_id: 222222
+      private_key_path: "/etc/github-stats-exporter/keys/org-a.pem"
+      scrape_interval: "5m"
+      repo_allowlist: ["*"]
+      per_org_concurrency: 8
+rate_limit:
+  min_remaining_threshold: 200
+  min_reset_buffer: "10s"
+  secondary_limit_backoff: "60s"
+retry:
+  max_attempts: 5
+  initial_backoff: "2s"
+  max_backoff: "30s"
+  jitter: true
+loc:
+  source: "stats_contributors"
+  refresh_interval: "24h"
+  fallback_enabled: true
+  fallback_max_commits_per_repo_per_week: 250
+  fallback_max_commit_detail_calls_per_org_per_hour: 1000
+  large_repo_zero_detection_windows: 2
+  large_repo_cooldown: "7d"
+backfill:
+  enabled: true
+  max_message_age: "24h"
+  consumer_count: 2
+  requeue_delays: ["1m", "5m", "30m", "2h"]
+  coalesce_window: "15m"
+  dedup_ttl: "12h"
+  max_enqueues_per_org_per_minute: 100
+amqp:
+  url: "amqp://githubstats:githubstats@rabbitmq:5672/"
+  exchange: "gh.backfill"
+  queue: "gh.backfill.jobs"
+  dlq: "gh.backfill.dlq"
+store:
+  backend: "redis"
+  redis_mode: "standalone"
+  redis_addr: "redis:6379"
+  redis_master_set: "mymaster"
+  redis_sentinel_addrs: []
+  redis_password: ""
+  redis_db: 0
+  retention: "30d"
+  metric_refresh_interval: "30s"
+  index_shards: 64
+  export_cache_mode: "incremental"
+  max_series_budget: 500000
+health:
+  github_probe_interval: "30s"
+  github_recover_success_threshold: 3
+telemetry:
+  otel_enabled: false
+  otel_exporter_otlp_endpoint: ""
+  otel_trace_mode: "off"
+  otel_trace_sample_ratio: 0.05`,
+	}
+	for _, extra := range extraSections {
+		trimmed := strings.TrimSpace(extra)
+		if trimmed == "" {
+			continue
+		}
+		sections = append(sections, trimmed)
+	}
+	return fmt.Sprintf("%s\n", strings.Join(sections, "\n"))
 }
