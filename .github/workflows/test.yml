@@ -63,7 +63,7 @@ jobs:
           docker compose version
       - name: Start stack
         env:
-          GITHUB_STATS_CONFIG_PATH: ./config/ci.yaml
+          GITHUB_STATS_CONFIG_PATH: ./config/local.yaml
         run: docker compose up -d --build
       - name: Wait for leader and follower readiness
         run: |
@@ -71,7 +71,7 @@ jobs:
           timeout 240 bash -c "until curl -fsS http://localhost:8081/readyz >/dev/null; do sleep 2; done"
       - name: Run compose functional checks
         env:
-          GITHUB_STATS_CONFIG_PATH: ./config/ci.yaml
+          GITHUB_STATS_CONFIG_PATH: ./config/local.yaml
         run: ./scripts/compose-functional-check.sh
       - name: Dump compose logs on failure
         if: failure()
@@ -79,5 +79,5 @@ jobs:
       - name: Tear down stack
         if: always()
         env:
-          GITHUB_STATS_CONFIG_PATH: ./config/ci.yaml
+          GITHUB_STATS_CONFIG_PATH: ./config/local.yaml
         run: docker compose down -v --remove-orphans
