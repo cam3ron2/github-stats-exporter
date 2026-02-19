@@ -10,7 +10,7 @@ ARG OCI_IMAGE_CREATED="1970-01-01T00:00:00Z"
 ARG OCI_IMAGE_TITLE="github-stats-exporter"
 ARG OCI_IMAGE_DESCRIPTION="GitHub activity metrics exporter in OpenMetrics format."
 
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26-alpine AS builder
 WORKDIR /src
 
 COPY . ./
@@ -18,7 +18,7 @@ RUN go mod download
 
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/github-stats-exporter ./cmd/github-stats-exporter
 
-FROM alpine:3.21
+FROM alpine:3.23
 ARG OCI_IMAGE_AUTHORS
 ARG OCI_IMAGE_URL
 ARG OCI_IMAGE_DOCUMENTATION
