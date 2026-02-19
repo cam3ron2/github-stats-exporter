@@ -56,15 +56,7 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
       - name: Run deterministic E2E tests
-        run: env -u GOROOT go test -coverprofile=coverage.txt -tags=e2e -race -count=1 -timeout 180s ./test/e2e/...
-      - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: ./coverage.txt
-          flags: e2e
-          name: e2e-${{ github.run_id }}
-          verbose: true
+        run: env -u GOROOT go test -tags=e2e -race -count=1 -timeout 180s ./test/e2e/...
   e2e-live-tests:
     name: E2E Tests (Live Scrape)
     runs-on: ubuntu-latest
@@ -103,15 +95,7 @@ jobs:
           echo "gh-app-key-org.pem fingerprint:"
           openssl pkey -in config/keys/gh-app-key-org.pem -pubout -outform DER | sha256sum
       - name: Run live E2E scrape tests
-        run: env -u GOROOT go test -coverprofile=coverage.txt -tags='e2e live' -race -v -count=1 -timeout 600s -run '^TestLiveScrapeFromLocalConfig$$' ./test/e2e/...
-      - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: ./coverage.txt
-          flags: e2e-live
-          name: e2e-live-${{ github.run_id }}
-          verbose: true
+        run: env -u GOROOT go test -tags='e2e live' -race -v -count=1 -timeout 600s -run '^TestLiveScrapeFromLocalConfig$$' ./test/e2e/...
       - name: Cleanup decrypted keys
         if: always()
         run: rm -f config/keys/gh-app-key.pem config/keys/gh-app-key-org.pem
