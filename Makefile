@@ -14,6 +14,15 @@ endif
 BINARY_NAME := github-stats-exporter
 CMD_SOURCE  := ./cmd/github-stats-exporter
 DOCKER_TAG  := github-stats-exporter
+OCI_IMAGE_AUTHORS ?= cam3ron2
+OCI_IMAGE_URL ?= https://github.com/cam3ron2/github-stats-exporter
+OCI_IMAGE_DOCUMENTATION ?= https://github.com/cam3ron2/github-stats-exporter/blob/main/README.md
+OCI_IMAGE_SOURCE ?= https://github.com/cam3ron2/github-stats-exporter
+OCI_IMAGE_REVISION ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
+OCI_IMAGE_VERSION ?= dev
+OCI_IMAGE_CREATED ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+OCI_IMAGE_TITLE ?= github-stats-exporter
+OCI_IMAGE_DESCRIPTION ?= GitHub activity metrics exporter in OpenMetrics format.
 
 ifndef NOCOLOR
   GREEN  := $(shell tput -Txterm setaf 2)
@@ -76,7 +85,16 @@ build :
 .PHONY: build-docker
 build-docker :
 	@echo "${YELLOW}[RUN] ${GREEN}Building docker image.${RESET}"
-	docker build . -t $(DOCKER_TAG)
+	docker build . -t $(DOCKER_TAG) \
+		--build-arg OCI_IMAGE_AUTHORS="$(OCI_IMAGE_AUTHORS)" \
+		--build-arg OCI_IMAGE_URL="$(OCI_IMAGE_URL)" \
+		--build-arg OCI_IMAGE_DOCUMENTATION="$(OCI_IMAGE_DOCUMENTATION)" \
+		--build-arg OCI_IMAGE_SOURCE="$(OCI_IMAGE_SOURCE)" \
+		--build-arg OCI_IMAGE_REVISION="$(OCI_IMAGE_REVISION)" \
+		--build-arg OCI_IMAGE_VERSION="$(OCI_IMAGE_VERSION)" \
+		--build-arg OCI_IMAGE_CREATED="$(OCI_IMAGE_CREATED)" \
+		--build-arg OCI_IMAGE_TITLE="$(OCI_IMAGE_TITLE)" \
+		--build-arg OCI_IMAGE_DESCRIPTION="$(OCI_IMAGE_DESCRIPTION)"
 
 ## Run the container locally via Docker Compose
 .PHONY: compose
