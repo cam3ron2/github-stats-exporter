@@ -30,6 +30,8 @@ env -u GOROOT GOCACHE=$(pwd)/.gocache GOMODCACHE=$(pwd)/.gomodcache \
 Benchmark file:
 
 - `internal/exporter/openmetrics_benchmark_test.go`
+- `docs/internal/copilot_capacity_report.md` (latest measured baseline + sizing
+  decision)
 
 ## 3. Prometheus recording + alert rules
 
