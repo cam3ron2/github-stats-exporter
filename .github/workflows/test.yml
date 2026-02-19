@@ -34,14 +34,14 @@ jobs:
           cache-dependency-path: go.sum
       - name: Run unit tests
         run: env -u GOROOT go test -race -count=1 -timeout 90s ./...
-  e2e-tests:
-    name: E2E Tests
+  e2e-tests-user:
+    name: E2E Tests (User)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      CI_GITHUB_APP_ORG: ${{ secrets.CI_GITHUB_APP_ORG }}
-      CI_GITHUB_APP_ID: ${{ secrets.CI_GITHUB_APP_ID }}
-      CI_GITHUB_APP_INSTALLATION_ID: ${{ secrets.CI_GITHUB_APP_INSTALLATION_ID }}
+      CI_GITHUB_APP_ORG: ${{ secrets.CI_GITHUB_APP_USER }}
+      CI_GITHUB_APP_ID: ${{ secrets.CI_GITHUB_APP_ID_USER }}
+      CI_GITHUB_APP_INSTALLATION_ID: ${{ secrets.CI_GITHUB_APP_INSTALLATION_ID_USER }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -56,7 +56,90 @@ jobs:
           gpg --batch --yes --decrypt \
             --output config/keys/gh-app-key.pem \
             config/keys/gh-app-key.gpg
-          chmod 600 config/keys/gh-app-key.pem
+          chmod 644 config/keys/gh-app-key.pem
+      - name: Show Docker versions
+        run: |
+          docker version
+          docker compose version
+      - name: Prepare CI GitHub App credentials
+        run: |
+          for value_name in CI_GITHUB_APP_ORG CI_GITHUB_APP_ID CI_GITHUB_APP_INSTALLATION_ID; do
+            if [ -z "${!value_name}" ]; then
+              echo "missing required secret: ${value_name}"
+              exit 1
+            fi
+          done
+
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          source_path = Path("config/local.yaml")
+          rendered = source_path.read_text(encoding="utf-8")
+          updates = [
+              (
+                  r'(?m)^(\s*(?:-\s*)?org:\s*).+$',
+                  lambda m: f'{m.group(1)}"{os.environ["CI_GITHUB_APP_ORG"]}"',
+              ),
+              (r'(?m)^(\s*app_id:\s*).+$', lambda m: f'{m.group(1)}{os.environ["CI_GITHUB_APP_ID"]}'),
+              (
+                  r'(?m)^(\s*installation_id:\s*).+$',
+                  lambda m: f'{m.group(1)}{os.environ["CI_GITHUB_APP_INSTALLATION_ID"]}',
+              ),
+              (r'(?m)^(\s*private_key_path:\s*).+$', lambda m: f'{m.group(1)}"/app/keys/gh-app-key.pem"'),
+          ]
+
+          for pattern, build_replacement in updates:
+              rendered, count = re.subn(pattern, build_replacement, rendered, count=1)
+              if count != 1:
+                  raise SystemExit(f"expected to patch one field for pattern: {pattern}")
+
+          Path("config/ci.yaml").write_text(rendered, encoding="utf-8")
+          PY
+      - name: Start stack
+        env:
+          GITHUB_STATS_CONFIG_PATH: ./config/ci.yaml
+        run: docker compose up -d --build
+      - name: Wait for leader and follower readiness
+        run: |
+          timeout 240 bash -c "until curl -fsS http://localhost:8080/readyz >/dev/null; do sleep 2; done"
+          timeout 240 bash -c "until curl -fsS http://localhost:8081/readyz >/dev/null; do sleep 2; done"
+      - name: Run compose functional checks
+        env:
+          GITHUB_STATS_CONFIG_PATH: ./config/ci.yaml
+        run: ./scripts/compose-functional-check.sh
+      - name: Dump compose logs on failure
+        if: failure()
+        run: docker compose logs --no-color --tail=400
+      - name: Tear down stack
+        if: always()
+        env:
+          GITHUB_STATS_CONFIG_PATH: ./config/ci.yaml
+        run: docker compose down -v --remove-orphans
+  e2e-tests-org:
+    name: E2E Tests (Organization)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CI_GITHUB_APP_ORG: ${{ secrets.CI_GITHUB_APP_ORG }}
+      CI_GITHUB_APP_ID: ${{ secrets.CI_GITHUB_APP_ID_ORG }}
+      CI_GITHUB_APP_INSTALLATION_ID: ${{ secrets.CI_GITHUB_APP_INSTALLATION_ID_ORG }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Import GPG key
+        uses: crazy-max/ghaction-import-gpg@v6
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.GPG_PASSPHRASE }}
+      - name: Decrypt GitHub App Key
+        run: |
+          mkdir -p config/keys
+          gpg --batch --yes --decrypt \
+            --output config/keys/gh-app-key.pem \
+            config/keys/gh-app-key-org.gpg
+          chmod 644 config/keys/gh-app-key.pem
       - name: Show Docker versions
         run: |
           docker version

@@ -25,6 +25,13 @@ github:
       scrape_interval: "5m"
       repo_allowlist: ["*"]
       per_org_concurrency: 4
+    - org: "shigops"
+      app_id: 2895926
+      installation_id: 110996531
+      private_key_path: "/app/keys/gh-app-key-org.pem"
+      scrape_interval: "5m"
+      repo_allowlist: ["*"]
+      per_org_concurrency: 4
 rate_limit:
   min_remaining_threshold: 200
   min_reset_buffer: "10s"
