@@ -18,7 +18,7 @@ RUN go mod download
 
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/github-stats-exporter ./cmd/github-stats-exporter
 
-FROM alpine:3.21
+FROM alpine:3.23
 ARG OCI_IMAGE_AUTHORS
 ARG OCI_IMAGE_URL
 ARG OCI_IMAGE_DOCUMENTATION
