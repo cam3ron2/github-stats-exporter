@@ -81,7 +81,7 @@ jobs:
           git fetch --force --tags origin
           git checkout "${{ needs.semantic-release.outputs.release_git_tag }}"
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: latest
