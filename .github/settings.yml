@@ -2,7 +2,7 @@
 ---
 repository:
   # See https://docs.github.com/en/rest/repos/repos#update-a-repository for all available settings.
-  topics: github, opentelemetry, otel, exporter, metrics, prometheus, activity, productivity, observability
+  topics: github, opentelemetry, otel, exporter, metrics, prometheus, activity, productivity, observability, test
   description: A service to scrape GitHub activity and export it as Prometheus metrics, written in Go.
   has_issues: true
   has_projects: false
